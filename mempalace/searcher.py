@@ -342,10 +342,22 @@ def search_memories(
     # This avoids the "weak-closets regression" where narrative content
     # produces low-signal closets (regex extraction matches few topics)
     # and closet-first routing hides drawers that direct search would find.
+    #
+    # Wing/room filters interact badly with HNSW: ANN fetches candidates from
+    # the full corpus, then metadata-filters. Small wings (< 1 % of corpus)
+    # are statistically unlikely to appear in the top-N ANN results, so the
+    # filtered result is often empty even when the relevant drawer exists.
+    # We compensate with two mitigations:
+    #   (a) Larger over-fetch (20x instead of 3x) when a filter is active.
+    #   (b) Full-scan fallback via .get() + BM25-only scoring when ANN still
+    #       returns nothing — ensures small wings are always reachable.
+    OVERFETCH_UNFILTERED = 3
+    OVERFETCH_FILTERED = 20
+    overfetch = OVERFETCH_FILTERED if where else OVERFETCH_UNFILTERED
     try:
         dkwargs = {
             "query_texts": [query],
-            "n_results": n_results * 3,  # over-fetch for re-ranking
+            "n_results": n_results * overfetch,
             "include": ["documents", "metadatas", "distances"],
         }
         if where:
@@ -353,6 +365,38 @@ def search_memories(
         drawer_results = drawers_col.query(**dkwargs)
     except Exception as e:
         return {"error": f"Search error: {e}"}
+
+    # Full-scan fallback: when ANN + filter produced zero candidates (typical
+    # for wings with < ~200 drawers), fetch ALL drawers in the wing via .get()
+    # and score them with BM25 only. Slower but correct.
+    if where and not _first_or_empty(drawer_results, "documents"):
+        try:
+            scan = drawers_col.get(where=where, include=["documents", "metadatas"])
+            scan_docs = scan.documents or []
+            scan_metas = scan.metadatas or []
+            if scan_docs:
+                bm25_only = _bm25_scores(query, scan_docs)
+                # Build synthetic drawer_results from the top-scoring docs.
+                combined = sorted(
+                    zip(bm25_only, scan_docs, scan_metas),
+                    key=lambda t: t[0],
+                    reverse=True,
+                )
+                # Fabricate the nested-list shape search_memories expects.
+                top = combined[: n_results * overfetch]
+                scores = [s for s, _, _ in top]
+                max_s = max(scores) if scores else 1.0
+                # Map BM25 → distance: best scorer → 0.5, zero scorer → 1.8.
+                # (Keeps fallback docs below strong vector hits but above noise.)
+                dists = [1.8 - 1.3 * (s / max_s) if max_s > 0 else 1.8 for s in scores]
+                drawer_results = {
+                    "documents": [[d for _, d, _ in top]],
+                    "metadatas": [[m for _, _, m in top]],
+                    "distances": [dists],
+                }
+                logger.debug("full-scan fallback: %d docs in filtered wing", len(scan_docs))
+        except Exception as scan_err:
+            logger.debug("full-scan fallback failed: %s", scan_err)
 
     # Gather closet hits (best-per-source) to build a boost lookup.
     closet_boost_by_source: dict = {}  # source_file -> (rank, closet_dist, preview)
