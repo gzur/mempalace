@@ -930,8 +930,77 @@ def mine(
 # =============================================================================
 
 
+def _status_via_sqlite(palace_path: str) -> bool:
+    """Fast status via direct SQLite query — no HNSW load needed.
+
+    Returns True if successful, False if the DB is missing or the schema
+    doesn't match expectations (caller should fall back to chromadb path).
+    """
+    import sqlite3
+
+    db = os.path.join(palace_path, "chroma.sqlite3")
+    if not os.path.isfile(db):
+        return False
+    try:
+        conn = sqlite3.connect(db)
+        c = conn.cursor()
+
+        # Find the METADATA segment for the drawers collection.
+        c.execute("""
+            SELECT s.id FROM segments s
+            JOIN collections col ON s.collection = col.id
+            WHERE col.name = 'mempalace_drawers' AND s.scope = 'METADATA'
+            LIMIT 1
+        """)
+        row = c.fetchone()
+        if not row:
+            conn.close()
+            return False
+        seg_id = row[0]
+
+        c.execute("SELECT COUNT(*) FROM embeddings WHERE segment_id = ?", (seg_id,))
+        total = c.fetchone()[0]
+
+        c.execute(
+            """
+            SELECT wing.string_value, room.string_value, COUNT(*) as cnt
+            FROM embeddings e
+            JOIN embedding_metadata wing ON wing.id = e.id AND wing.key = 'wing'
+            JOIN embedding_metadata room ON room.id = e.id AND room.key = 'room'
+            WHERE e.segment_id = ?
+            GROUP BY 1, 2
+            ORDER BY 1, 3 DESC
+        """,
+            (seg_id,),
+        )
+        rows = c.fetchall()
+        conn.close()
+    except Exception:
+        return False
+
+    wing_rooms: dict = defaultdict(lambda: defaultdict(int))
+    for wing, room, cnt in rows:
+        wing_rooms[wing or "?"][room or "?"] = cnt
+
+    print(f"\n{'=' * 55}")
+    print(f"  MemPalace Status — {total} drawers")
+    print(f"{'=' * 55}\n")
+    for wing, rooms in sorted(wing_rooms.items()):
+        print(f"  WING: {wing}")
+        for room, count in sorted(rooms.items(), key=lambda x: x[1], reverse=True):
+            print(f"    ROOM: {room:20} {count:5} drawers")
+        print()
+    print(f"{'=' * 55}\n")
+    return True
+
+
 def status(palace_path: str):
     """Show what's been filed in the palace."""
+    # Fast path: query SQLite directly — skips HNSW load entirely.
+    if _status_via_sqlite(palace_path):
+        return
+
+    # Fallback: use chromadb (slower, loads HNSW index).
     try:
         col = get_collection(palace_path, create=False)
     except Exception:
@@ -939,8 +1008,6 @@ def status(palace_path: str):
         print("  Run: mempalace init <dir> then mempalace mine <dir>")
         return
 
-    # Count by wing and room — paginate to avoid SQLite "too many SQL
-    # variables" error on large palaces (see #802, #850).
     total = col.count()
     wing_rooms: dict = defaultdict(lambda: defaultdict(int))
     batch_size = 5000
