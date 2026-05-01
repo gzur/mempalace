@@ -13,7 +13,8 @@ Tools (read):
   mempalace_check_duplicate — check if content already exists before filing
 
 Tools (write):
-  mempalace_add_drawer      — file verbatim content into a wing/room
+  mempalace_add_drawer      — file verbatim content into a wing/room (returns verified: true/false)
+  mempalace_recent_ops      — last N WAL entries to verify recent write outcomes
   mempalace_delete_drawer   — remove a drawer by ID
 
 Tools (maintenance):
@@ -622,22 +623,22 @@ def tool_add_drawer(
         f"drawer_{wing}_{room}_{hashlib.sha256((wing + room + content).encode()).hexdigest()[:24]}"
     )
 
-    _wal_log(
-        "add_drawer",
-        {
-            "drawer_id": drawer_id,
-            "wing": wing,
-            "room": room,
-            "added_by": added_by,
-            "content_length": len(content),
-            "content_preview": content[:200],
-        },
-    )
-
     # Idempotency: if the deterministic ID already exists, return success as a no-op.
     try:
         existing = col.get(ids=[drawer_id])
         if existing and existing["ids"]:
+            _wal_log(
+                "add_drawer",
+                {
+                    "drawer_id": drawer_id,
+                    "wing": wing,
+                    "room": room,
+                    "added_by": added_by,
+                    "content_length": len(content),
+                    "content_preview": content[:200],
+                },
+                {"success": True, "reason": "already_exists"},
+            )
             return {"success": True, "reason": "already_exists", "drawer_id": drawer_id}
     except Exception:
         pass
@@ -658,10 +659,74 @@ def tool_add_drawer(
             ],
         )
         _metadata_cache = None
-        logger.info(f"Filed drawer: {drawer_id} → {wing}/{room}")
-        return {"success": True, "drawer_id": drawer_id, "wing": wing, "room": room}
+
+        # Verify the drawer is readable after write — closes the silent-failure gap.
+        try:
+            check = col.get(ids=[drawer_id])
+            verified = bool(check and check.get("ids"))
+        except Exception:
+            verified = False
+
+        result = {
+            "success": verified,
+            "drawer_id": drawer_id,
+            "wing": wing,
+            "room": room,
+            "verified": verified,
+        }
+        if not verified:
+            result["error"] = "Write appeared to succeed but drawer was not readable afterward"
+
+        _wal_log(
+            "add_drawer",
+            {
+                "drawer_id": drawer_id,
+                "wing": wing,
+                "room": room,
+                "added_by": added_by,
+                "content_length": len(content),
+                "content_preview": content[:200],
+            },
+            {"success": verified, "verified": verified},
+        )
+        logger.info(f"Filed drawer: {drawer_id} → {wing}/{room} (verified={verified})")
+        return result
     except Exception as e:
+        _wal_log(
+            "add_drawer",
+            {
+                "drawer_id": drawer_id,
+                "wing": wing,
+                "room": room,
+                "added_by": added_by,
+                "content_length": len(content),
+                "content_preview": content[:200],
+            },
+            {"success": False, "error": str(e)},
+        )
         return {"success": False, "error": str(e)}
+
+
+def tool_recent_ops(limit: int = 10) -> dict:
+    """Return the last N WAL entries so agents can verify recent write outcomes."""
+    limit = max(1, min(limit, 100))
+    if not _WAL_FILE.is_file():
+        return {"operations": [], "note": "No WAL file found — no writes recorded yet."}
+    try:
+        lines = _WAL_FILE.read_text(encoding="utf-8").splitlines()
+        recent = lines[-limit:]
+        ops = []
+        for line in recent:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ops.append(json.loads(line))
+            except json.JSONDecodeError:
+                ops.append({"raw": line, "parse_error": True})
+        return {"operations": ops, "total_in_log": len(lines)}
+    except Exception as e:
+        return {"error": f"Could not read WAL: {e}"}
 
 
 def tool_delete_drawer(drawer_id: str):
@@ -1429,6 +1494,21 @@ TOOLS = {
             "required": ["wing", "room", "content"],
         },
         "handler": tool_add_drawer,
+    },
+    "mempalace_recent_ops": {
+        "description": "Return last N WAL entries to verify recent write outcomes. Call after a suspected add_drawer failure.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "description": "Number of recent operations to return (default 10, max 100)",
+                    "default": 10,
+                },
+            },
+            "required": [],
+        },
+        "handler": tool_recent_ops,
     },
     "mempalace_delete_drawer": {
         "description": "Delete a drawer by ID. Irreversible.",
