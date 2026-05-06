@@ -351,7 +351,7 @@ FORMAT:
   DATES: ISO format (2026-03-31). COUNTS: Nx = N mentions (e.g., 570x).
   IMPORTANCE: ★ to ★★★★★ (1-5 scale).
   HALLS: hall_facts, hall_events, hall_discoveries, hall_preferences, hall_advice.
-  WINGS: wing_user, wing_agent, wing_team, wing_code, wing_myproject, wing_hardware, wing_ue5, wing_ai_research.
+  WINGS: short bare names for top-level domains (e.g., self, work, projectname, agents). Do NOT prefix with "wing_" — that's a type label, not part of the name. Use list_wings to see the wings that exist; reuse before creating new ones.
   ROOMS: Hyphenated slugs representing named ideas (e.g., chromadb-setup, gpu-pricing).
 
 EXAMPLE:
@@ -999,9 +999,16 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general", wing: 
 
     if wing:
         wing = sanitize_name(wing)
+        # Strip legacy "wing_" prefix that older agents/spec text encouraged.
+        # The prefix is a type label, not part of the wing's name.
+        if wing.startswith("wing_") and len(wing) > 5:
+            wing = wing[5:]
+        room = "diary"
     else:
-        wing = f"wing_{agent_name.lower().replace(' ', '_')}"
-    room = "diary"
+        # Per-agent diaries live in a single shared "agents" wing as separate
+        # rooms — they are not their own top-level wings.
+        wing = "agents"
+        room = sanitize_name(agent_name.lower())
     col = _get_collection(create=True)
     if not col:
         return _no_palace()
@@ -1578,13 +1585,13 @@ TOOLS = {
         "handler": tool_update_drawer,
     },
     "mempalace_diary_write": {
-        "description": "Write to your personal agent diary in AAAK format. Your observations, thoughts, what you worked on, what matters. Each agent has their own diary with full history. Write in AAAK for compression — e.g. 'SESSION:2026-04-04|built.palace.graph+diary.tools|ALC.req:agent.diaries.in.aaak|★★★'. Use entity codes from the AAAK spec.",
+        "description": "Write to your personal agent diary in AAAK format. Your observations, thoughts, what you worked on, what matters. Each agent has its own diary room (under the shared 'agents' wing by default). Write in AAAK for compression — e.g. 'SESSION:2026-04-04|built.palace.graph+diary.tools|ALC.req:agent.diaries.in.aaak|★★★'. Use entity codes from the AAAK spec.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "agent_name": {
                     "type": "string",
-                    "description": "Your name — each agent gets their own diary wing",
+                    "description": "Your name — used as the room slug under the 'agents' wing when no wing is provided",
                 },
                 "entry": {
                     "type": "string",
@@ -1596,7 +1603,7 @@ TOOLS = {
                 },
                 "wing": {
                     "type": "string",
-                    "description": "Target wing for this diary entry (optional). If omitted, uses wing_{agent_name}. Use this to write diary entries to a project wing instead of an agent-specific wing.",
+                    "description": "Target wing for this diary entry (optional). If omitted, the entry is filed under wing='agents', room=agent_name. If provided, the entry goes to that wing's 'diary' room. Use a bare wing name (e.g. 'skyvafnir'), NOT 'wing_skyvafnir' — the 'wing_' prefix is a type label, not part of the name.",
                 },
             },
             "required": ["agent_name", "entry"],
