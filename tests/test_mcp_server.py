@@ -172,6 +172,16 @@ class TestHandleRequest:
         resp = handle_request({"method": "unknown/thing", "params": {}})
         assert resp is None
 
+    def test_initialize_includes_instructions(self):
+        """Handshake must inject MEMPALACE_INSTRUCTIONS so agents see the bd-filing rule."""
+        from mempalace.mcp_server import handle_request, MEMPALACE_INSTRUCTIONS
+
+        resp = handle_request({"method": "initialize", "id": 1, "params": {}})
+        assert resp["result"]["instructions"] == MEMPALACE_INSTRUCTIONS
+        assert "bd create" in resp["result"]["instructions"]
+        assert "label=mempalace" in resp["result"]["instructions"]
+        assert "failure_signature" in resp["result"]["instructions"]
+
     def test_malformed_method_none(self):
         """method=None or missing should not crash."""
         from mempalace.mcp_server import handle_request
@@ -206,6 +216,205 @@ class TestHandleRequest:
         assert "result" in resp
         content = json.loads(resp["result"]["content"][0]["text"])
         assert "total_drawers" in content
+
+
+class TestFailureSignature:
+    """Signature is stable per code path and identifies bugs across calls."""
+
+    def test_signature_stable_for_same_code_path(self):
+        from mempalace.mcp_server import _failure_signature
+
+        def boom(_x):
+            raise ValueError("first")
+
+        try:
+            boom(1)
+        except ValueError as e:
+            sig_a = _failure_signature("tool_x", e)
+
+        try:
+            boom(2)
+        except ValueError as e:
+            sig_b = _failure_signature("tool_x", e)
+
+        assert sig_a == sig_b
+        assert len(sig_a) == 10
+
+    def test_signature_differs_per_exception_class(self):
+        from mempalace.mcp_server import _failure_signature
+
+        try:
+            raise ValueError("x")
+        except ValueError as e:
+            sig_v = _failure_signature("tool_x", e)
+        try:
+            raise TypeError("x")
+        except TypeError as e:
+            sig_t = _failure_signature("tool_x", e)
+        assert sig_v != sig_t
+
+    def test_signature_differs_per_tool(self):
+        from mempalace.mcp_server import _failure_signature
+
+        try:
+            raise ValueError("x")
+        except ValueError as e:
+            sig_a = _failure_signature("tool_a", e)
+        try:
+            raise ValueError("x")
+        except ValueError as e:
+            sig_b = _failure_signature("tool_b", e)
+        assert sig_a != sig_b
+
+    def test_signature_handles_no_traceback(self):
+        from mempalace.mcp_server import _failure_signature
+
+        e = RuntimeError("synthetic")  # never raised → __traceback__ is None
+        sig = _failure_signature("tool_x", e)
+        assert len(sig) == 10
+
+    def test_tool_error_signature_stable(self):
+        from mempalace.mcp_server import _tool_error_signature
+
+        a = _tool_error_signature("tool_x", "wing not found")
+        b = _tool_error_signature("tool_x", "wing not found")
+        assert a == b
+
+    def test_tool_error_signature_different_messages(self):
+        from mempalace.mcp_server import _tool_error_signature
+
+        a = _tool_error_signature("tool_x", "wing not found")
+        b = _tool_error_signature("tool_x", "drawer not found")
+        assert a != b
+
+
+class TestProtocolErrorSurfacing:
+    """tools/call dispatch must surface real exception messages + signatures."""
+
+    def test_protocol_exception_exposes_class_and_message(self, monkeypatch):
+        """Uncaught handler exception → error.message contains class + msg, error.data has signature."""
+        from mempalace import mcp_server
+
+        # Inject a handler that always raises
+        original_tools = mcp_server.TOOLS
+        fake_tools = dict(original_tools)
+        fake_tools["__test_boom"] = {
+            "description": "test",
+            "input_schema": {"type": "object", "properties": {}},
+            "handler": lambda **_: (_ for _ in ()).throw(ValueError("boom-detail")),
+        }
+        monkeypatch.setattr(mcp_server, "TOOLS", fake_tools)
+
+        resp = mcp_server.handle_request(
+            {
+                "method": "tools/call",
+                "id": 99,
+                "params": {"name": "__test_boom", "arguments": {}},
+            }
+        )
+        assert resp["error"]["code"] == -32000
+        assert "ValueError" in resp["error"]["message"]
+        assert "boom-detail" in resp["error"]["message"]
+        assert "failure_signature" in resp["error"]["data"]
+        assert len(resp["error"]["data"]["failure_signature"]) == 10
+        assert resp["error"]["data"]["tool"] == "__test_boom"
+
+    def test_protocol_exception_signature_stable(self, monkeypatch):
+        """Same bug raised twice → identical signature."""
+        from mempalace import mcp_server
+
+        def always_raises(**_):
+            raise RuntimeError("recurring")
+
+        fake_tools = dict(mcp_server.TOOLS)
+        fake_tools["__test_recurring"] = {
+            "description": "test",
+            "input_schema": {"type": "object", "properties": {}},
+            "handler": always_raises,
+        }
+        monkeypatch.setattr(mcp_server, "TOOLS", fake_tools)
+
+        sigs = []
+        for i in range(2):
+            resp = mcp_server.handle_request(
+                {
+                    "method": "tools/call",
+                    "id": i,
+                    "params": {"name": "__test_recurring", "arguments": {}},
+                }
+            )
+            sigs.append(resp["error"]["data"]["failure_signature"])
+        assert sigs[0] == sigs[1]
+
+    def test_handler_error_dict_gets_signature_injected(self, monkeypatch):
+        """Handler returning {'error': ...} must have failure_signature added."""
+        from mempalace import mcp_server
+
+        fake_tools = dict(mcp_server.TOOLS)
+        fake_tools["__test_softerror"] = {
+            "description": "test",
+            "input_schema": {"type": "object", "properties": {}},
+            "handler": lambda **_: {"error": "something bad"},
+        }
+        monkeypatch.setattr(mcp_server, "TOOLS", fake_tools)
+
+        resp = mcp_server.handle_request(
+            {
+                "method": "tools/call",
+                "id": 1,
+                "params": {"name": "__test_softerror", "arguments": {}},
+            }
+        )
+        # tool-level errors are in result.content (not top-level error)
+        payload = json.loads(resp["result"]["content"][0]["text"])
+        assert payload["error"] == "something bad"
+        assert "failure_signature" in payload
+        assert len(payload["failure_signature"]) == 10
+
+    def test_handler_success_false_gets_signature_injected(self, monkeypatch):
+        """Handlers returning {'success': False, 'error': ...} also get a signature."""
+        from mempalace import mcp_server
+
+        fake_tools = dict(mcp_server.TOOLS)
+        fake_tools["__test_failure"] = {
+            "description": "test",
+            "input_schema": {"type": "object", "properties": {}},
+            "handler": lambda **_: {"success": False, "error": "rejected"},
+        }
+        monkeypatch.setattr(mcp_server, "TOOLS", fake_tools)
+
+        resp = mcp_server.handle_request(
+            {
+                "method": "tools/call",
+                "id": 1,
+                "params": {"name": "__test_failure", "arguments": {}},
+            }
+        )
+        payload = json.loads(resp["result"]["content"][0]["text"])
+        assert payload["success"] is False
+        assert "failure_signature" in payload
+
+    def test_handler_success_true_no_signature(self, monkeypatch):
+        """Successful results must not be tagged."""
+        from mempalace import mcp_server
+
+        fake_tools = dict(mcp_server.TOOLS)
+        fake_tools["__test_ok"] = {
+            "description": "test",
+            "input_schema": {"type": "object", "properties": {}},
+            "handler": lambda **_: {"success": True, "value": 42},
+        }
+        monkeypatch.setattr(mcp_server, "TOOLS", fake_tools)
+
+        resp = mcp_server.handle_request(
+            {
+                "method": "tools/call",
+                "id": 1,
+                "params": {"name": "__test_ok", "arguments": {}},
+            }
+        )
+        payload = json.loads(resp["result"]["content"][0]["text"])
+        assert "failure_signature" not in payload
 
 
 # ── Read Tools ──────────────────────────────────────────────────────────
@@ -476,9 +685,9 @@ class TestWriteTools:
 
         assert result1["success"] is True
         assert result2["success"] is True
-        assert (
-            result1["drawer_id"] != result2["drawer_id"]
-        ), "Documents with shared header but different content must have distinct drawer IDs"
+        assert result1["drawer_id"] != result2["drawer_id"], (
+            "Documents with shared header but different content must have distinct drawer IDs"
+        )
 
     def test_delete_drawer(self, monkeypatch, config, palace_path, seeded_collection, kg):
         _patch_mcp_server(monkeypatch, config, kg)

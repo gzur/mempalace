@@ -48,6 +48,7 @@ import json  # noqa: E402
 import logging  # noqa: E402
 import hashlib  # noqa: E402
 import time  # noqa: E402
+import traceback  # noqa: E402
 from datetime import datetime  # noqa: E402
 from pathlib import Path  # noqa: E402
 
@@ -158,6 +159,24 @@ def _wal_log(operation: str, params: dict, result: dict = None):
             f.write(json.dumps(entry, default=str) + "\n")
     except Exception as e:
         logger.error(f"WAL write failed: {e}")
+
+
+def _failure_signature(tool_name: str, exc: BaseException) -> str:
+    """sha1(tool|ExcClass|topframe_file:line)[:10] — stable per code path, varies per bug."""
+    frame = ""
+    tb = exc.__traceback__
+    if tb is not None:
+        frames = traceback.extract_tb(tb)
+        if frames:
+            last = frames[-1]
+            frame = f"{os.path.basename(last.filename)}:{last.lineno}"
+    key = f"{tool_name}|{type(exc).__name__}|{frame}"
+    return hashlib.sha1(key.encode()).hexdigest()[:10]
+
+
+def _tool_error_signature(tool_name: str, err_msg: str) -> str:
+    """Signature for handler-returned error dicts (no exception object available)."""
+    return hashlib.sha1(f"{tool_name}|ToolError|{err_msg[:80]}".encode()).hexdigest()[:10]
 
 
 def _get_client():
@@ -340,6 +359,12 @@ PALACE_PROTOCOL = """IMPORTANT — MemPalace Memory Protocol:
 5. WHEN FACTS CHANGE: call mempalace_kg_invalidate on the old fact, mempalace_kg_add for the new one.
 
 This protocol ensures the AI KNOWS before it speaks. Storage is not memory — but storage + this protocol = memory."""
+
+MEMPALACE_INSTRUCTIONS = """When a mempalace tool returns a `failure_signature` in its error response, exercise judgment: if it looks like a real bug (crash, traceback, internal error) rather than user-input failure (not found, validation, missing arg), file a beads issue.
+
+Dedup first. Run: `bd list --label=mempalace --status=open` and grep for the failure_signature. If matched, append context: `bd update <id> --notes='<args + signature + observed>'`. Otherwise create: `bd create --type=bug --label=mempalace --priority=2 --title='<tool_name>: <short>' --description='<verbatim error + tool_name + failure_signature + minimal repro args>'`.
+
+Always include the failure_signature verbatim in the title or description so future calls can grep it. Skip filing for benign user errors (drawer/wing not found, invalid arg, duplicate)."""
 
 AAAK_SPEC = """AAAK is a compressed memory dialect that MemPalace uses for efficient storage.
 It is designed to be readable by both humans and LLMs without decoding.
@@ -1699,6 +1724,7 @@ def handle_request(request):
                 "protocolVersion": negotiated,
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": "mempalace", "version": __version__},
+                "instructions": MEMPALACE_INSTRUCTIONS,
             },
         }
     elif method == "ping":
@@ -1763,17 +1789,28 @@ def handle_request(request):
         try:
             tool_args.pop("wait_for_previous", None)
             result = TOOLS[tool_name]["handler"](**tool_args)
+            # Tag handler-returned error dicts with a stable signature so the
+            # agent can dedup against open beads (see MEMPALACE_INSTRUCTIONS).
+            if isinstance(result, dict) and ("error" in result or result.get("success") is False):
+                err_msg = str(result.get("error", "unspecified"))
+                result.setdefault("failure_signature", _tool_error_signature(tool_name, err_msg))
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
                 "result": {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]},
             }
-        except Exception:
+        except Exception as e:
             logger.exception(f"Tool error in {tool_name}")
+            sig = _failure_signature(tool_name, e)
+            msg = f"{type(e).__name__}: {e}"[:500]
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
-                "error": {"code": -32000, "message": "Internal tool error"},
+                "error": {
+                    "code": -32000,
+                    "message": msg,
+                    "data": {"tool": tool_name, "failure_signature": sig},
+                },
             }
 
     # Notifications (missing id) must never get a response
