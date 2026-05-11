@@ -13,10 +13,12 @@ from mempalace.hooks_cli import (
     _count_human_messages,
     _extract_recent_messages,
     _get_mine_dir,
+    _is_convo_dir,
     _log,
     _maybe_auto_ingest,
     _mempalace_python,
     _mine_already_running,
+    _mine_sync,
     _parse_harness_input,
     _sanitize_session_id,
     _validate_transcript_path,
@@ -478,6 +480,64 @@ def test_maybe_auto_ingest_skips_when_mine_running(tmp_path):
                 with patch("mempalace.hooks_cli.subprocess.Popen") as mock_popen:
                     _maybe_auto_ingest()
                     mock_popen.assert_not_called()
+
+
+# --- _is_convo_dir + convo-dir skip guard ---
+
+
+def test_is_convo_dir_claude_projects():
+    assert _is_convo_dir("/Users/anyone/.claude/projects/some-proj")
+    assert _is_convo_dir("/Users/anyone/.claude/projects/some-proj/")
+    assert _is_convo_dir("~/.claude/projects/some-proj")
+
+
+def test_is_convo_dir_codex_sessions():
+    assert _is_convo_dir("/Users/anyone/.codex/sessions/2026-05")
+
+
+def test_is_convo_dir_regular_project():
+    assert not _is_convo_dir("/Users/anyone/code/my-app")
+    assert not _is_convo_dir("/tmp/some-random-dir")
+
+
+def test_maybe_auto_ingest_skips_claude_projects_dir(tmp_path):
+    """Default-mode mining on Claude projects dir hangs in chromadb rust (self-gqu).
+    Transcript ingest with --mode convos already covers that dir, so skip."""
+    convo_dir = tmp_path / ".claude" / "projects" / "proj-x"
+    convo_dir.mkdir(parents=True)
+    with patch.dict("os.environ", {"MEMPAL_DIR": str(convo_dir)}):
+        with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+            with patch("mempalace.hooks_cli._MINE_PID_FILE", tmp_path / "mine.pid"):
+                with patch("mempalace.hooks_cli.subprocess.Popen") as mock_popen:
+                    _maybe_auto_ingest()
+                    mock_popen.assert_not_called()
+
+
+def test_maybe_auto_ingest_skips_via_transcript_path(tmp_path):
+    """Transcript at ~/.claude/projects/X/t.jsonl → mine_dir is convo dir → skip."""
+    convo_dir = tmp_path / ".claude" / "projects" / "proj-x"
+    convo_dir.mkdir(parents=True)
+    transcript = convo_dir / "t.jsonl"
+    transcript.write_text("")
+    with patch.dict("os.environ", {}, clear=True):
+        with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+            with patch("mempalace.hooks_cli._MINE_PID_FILE", tmp_path / "mine.pid"):
+                with patch("mempalace.hooks_cli.subprocess.Popen") as mock_popen:
+                    _maybe_auto_ingest(str(transcript))
+                    mock_popen.assert_not_called()
+
+
+def test_mine_sync_skips_convo_dir(tmp_path):
+    """_mine_sync (precompact path) must also skip convo dirs."""
+    convo_dir = tmp_path / ".claude" / "projects" / "proj-x"
+    convo_dir.mkdir(parents=True)
+    transcript = convo_dir / "t.jsonl"
+    transcript.write_text("")
+    with patch.dict("os.environ", {}, clear=True):
+        with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+            with patch("mempalace.hooks_cli.subprocess.run") as mock_run:
+                _mine_sync(str(transcript))
+                mock_run.assert_not_called()
 
 
 # --- _mine_already_running ---

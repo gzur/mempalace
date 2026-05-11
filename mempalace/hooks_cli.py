@@ -263,10 +263,27 @@ def _spawn_mine(cmd: list) -> None:
     _MINE_PID_FILE.write_text(str(proc.pid))
 
 
+_CONVO_DIRS = ("/.claude/projects/", "/.codex/sessions/")
+
+
+def _is_convo_dir(mine_dir: str) -> bool:
+    """True if mine_dir holds Claude/Codex JSONL transcripts (already mined via _ingest_transcript)."""
+    resolved = str(Path(mine_dir).expanduser().resolve())
+    return any(marker in resolved + "/" for marker in _CONVO_DIRS)
+
+
 def _maybe_auto_ingest(transcript_path: str = ""):
-    """Run mempalace mine in background if a mine directory is available."""
+    """Run mempalace mine in background if a mine directory is available.
+
+    Skips conversation directories: _ingest_transcript already handles those
+    with `--mode convos`. Running default `projects` mode on JSONL transcripts
+    is redundant and stalls inside the chromadb rust bindings.
+    """
     mine_dir = _get_mine_dir(transcript_path)
     if not mine_dir:
+        return
+    if _is_convo_dir(mine_dir):
+        _log(f"Skipping auto-ingest: {mine_dir} is a convo dir (handled by transcript ingest)")
         return
     if _mine_already_running():
         _log("Skipping auto-ingest: mine already running")
@@ -281,6 +298,9 @@ def _mine_sync(transcript_path: str = ""):
     """Run mempalace mine synchronously (for precompact -- data must land first)."""
     mine_dir = _get_mine_dir(transcript_path)
     if not mine_dir:
+        return
+    if _is_convo_dir(mine_dir):
+        _log(f"Skipping sync mine: {mine_dir} is a convo dir (handled by transcript ingest)")
         return
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
