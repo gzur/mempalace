@@ -72,6 +72,7 @@ from .backends.chroma import (  # noqa: E402
     _pin_hnsw_threads,
     hnsw_capacity_status,
 )
+from .searcher import search_memories  # noqa: E402
 from .query_sanitizer import sanitize_query  # noqa: E402
 from .palace_graph import (  # noqa: E402
     traverse,
@@ -693,6 +694,19 @@ def tool_status():
         "protocol": PALACE_PROTOCOL,
         "aaak_dialect": AAAK_SPEC,
     }
+    try:
+        all_meta = _get_cached_metadata(col)
+        for m in all_meta:
+            m = m or {}
+            w = m.get("wing", "unknown")
+            r = m.get("room", "unknown")
+            wings[w] = wings.get(w, 0) + 1
+            rooms[r] = rooms.get(r, 0) + 1
+    except Exception as e:
+        logger.exception("tool_status metadata fetch failed")
+        result["error"] = str(e)
+        result["partial"] = True
+    return result
 
 
 # ── AAAK Dialect Spec ─────────────────────────────────────────────────────────
@@ -791,15 +805,16 @@ def tool_search(
     min_similarity: float = None,
     context: str = None,
 ):
-    # Semantic search via chromadb is currently blocked by the SIGSEGV in
-    # bead self-mob. Fall back to substring FTS over chroma.sqlite3 so callers
-    # at least get hits; mark ``degraded`` so the caller can adjust.
     limit = max(1, min(limit, _MAX_RESULTS))
     try:
         wing = _sanitize_optional_name(wing, "wing")
         room = _sanitize_optional_name(room, "room")
     except ValueError as e:
         return {"error": str(e)}
+    # Backwards compat: convert old similarity scale (higher=stricter) to
+    # distance scale (lower=stricter). Similarity 0.8 → distance 0.2.
+    dist = (1.0 - min_similarity) if min_similarity is not None else max_distance
+    # Mitigate system prompt contamination (Issue #333)
     sanitized = sanitize_query(query)
     # Ensure the vector-disabled probe has been run via the safe
     # sqlite/pickle path before we touch chromadb. Calling _get_client()
