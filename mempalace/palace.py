@@ -271,6 +271,71 @@ def upsert_closet_lines(closets_col, closet_id_base, lines, metadata):
     return closets_written
 
 
+_LOCK_DIR = os.path.join(os.path.expanduser("~"), ".mempalace", "locks")
+_STALE_LOCK_AGE_SECONDS = 24 * 3600
+
+
+def reap_stale_locks(lock_dir: str = _LOCK_DIR, stale_age: int = _STALE_LOCK_AGE_SECONDS) -> int:
+    """Remove orphaned ``mine_lock`` files in ``lock_dir``.
+
+    Two-phase sweep, race-safe:
+      1. TTL backstop: unconditionally delete files older than ``stale_age`` seconds.
+         A mine that holds a lock longer than this is already broken.
+      2. Non-blocking ``flock`` probe: if we can acquire the lock instantly, no
+         process holds it → delete. If blocked, skip — someone is actively mining.
+
+    Returns count of files removed. No-op on Windows (no fcntl).
+    """
+    import time
+
+    if not os.path.isdir(lock_dir):
+        return 0
+
+    removed = 0
+    now = time.time()
+
+    for entry in os.scandir(lock_dir):
+        if not entry.name.endswith(".lock"):
+            continue
+        path = entry.path
+        try:
+            mtime = entry.stat().st_mtime
+        except OSError:
+            continue
+
+        if now - mtime > stale_age:
+            try:
+                os.unlink(path)
+                removed += 1
+            except OSError:
+                pass
+            continue
+
+        if os.name == "nt":
+            continue
+
+        try:
+            import fcntl
+
+            with open(path, "r+") as f:
+                try:
+                    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    continue
+                try:
+                    os.unlink(path)
+                    removed += 1
+                finally:
+                    try:
+                        fcntl.flock(f, fcntl.LOCK_UN)
+                    except OSError:
+                        pass
+        except (FileNotFoundError, OSError):
+            continue
+
+    return removed
+
+
 @contextlib.contextmanager
 def mine_lock(source_file: str):
     """Cross-platform file lock for mine operations.
@@ -278,7 +343,7 @@ def mine_lock(source_file: str):
     Prevents multiple agents from mining the same file simultaneously,
     which causes duplicate drawers when the delete+insert cycle interleaves.
     """
-    lock_dir = os.path.join(os.path.expanduser("~"), ".mempalace", "locks")
+    lock_dir = _LOCK_DIR
     os.makedirs(lock_dir, exist_ok=True)
     lock_path = os.path.join(
         lock_dir, hashlib.sha256(source_file.encode()).hexdigest()[:16] + ".lock"

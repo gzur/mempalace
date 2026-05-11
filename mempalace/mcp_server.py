@@ -1839,6 +1839,14 @@ def _restore_stdout():
 def main():
     _restore_stdout()
     logger.info("MemPalace MCP Server starting...")
+    try:
+        from .palace import reap_stale_locks
+
+        reaped = reap_stale_locks()
+        if reaped:
+            logger.info(f"reaped {reaped} stale mine_lock files")
+    except Exception as e:
+        logger.warning(f"lock reaper skipped: {e}")
     while True:
         try:
             line = sys.stdin.readline()
