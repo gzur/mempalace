@@ -85,6 +85,23 @@ def _parse_args():
         metavar="PATH",
         help="Path to the palace directory (overrides config file and env var)",
     )
+    parser.add_argument(
+        "--transport",
+        choices=["stdio", "http"],
+        default="stdio",
+        help="Transport for MCP traffic (default: stdio)",
+    )
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Bind host for --transport http (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=9876,
+        help="Bind port for --transport http (default: 9876)",
+    )
     args, unknown = parser.parse_known_args()
     if unknown:
         logger.debug("Ignoring unknown args: %s", unknown)
@@ -95,6 +112,46 @@ _args = _parse_args()
 
 if _args.palace:
     os.environ["MEMPALACE_PALACE_PATH"] = os.path.abspath(_args.palace)
+
+
+def _default_added_by() -> str:
+    """Author tag for writes that don't pass added_by explicitly.
+
+    Returns ``mcp-<session_id>`` when an HTTP request is in flight and threaded
+    a session id via the X-Session-Id header; falls back to ``mcp`` for stdio
+    callers and for HTTP requests with no session header.
+    """
+    try:
+        from .http_server import current_session_id
+
+        sid = current_session_id()
+    except (ImportError, LookupError):
+        return "mcp"
+    if not sid or sid == "anonymous":
+        return "mcp"
+    return f"mcp-{sid}"
+
+
+def _setup_logging(transport: str) -> None:
+    """Add rotating JSON file handler when running as a long-lived HTTP daemon."""
+    if transport != "http":
+        return
+    import logging.handlers
+
+    log_dir = Path.home() / ".mempalace" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    handler = logging.handlers.RotatingFileHandler(
+        log_dir / "daemon.log", maxBytes=50 * 1024 * 1024, backupCount=5
+    )
+    handler.setFormatter(
+        logging.Formatter(
+            '{"ts":"%(asctime)s","level":"%(levelname)s","logger":"%(name)s","msg":"%(message)s"}'
+        )
+    )
+    root = logging.getLogger()
+    root.addHandler(handler)
+    root.setLevel(logging.INFO)
+
 
 _config = MempalaceConfig()
 # Only override KG path when --palace is explicitly provided; otherwise use
@@ -629,10 +686,12 @@ def tool_follow_tunnels(wing: str, room: str):
 
 
 def tool_add_drawer(
-    wing: str, room: str, content: str, source_file: str = None, added_by: str = "mcp"
+    wing: str, room: str, content: str, source_file: str = None, added_by: str = None
 ):
     """File verbatim content into a wing/room. Checks for duplicates first."""
     global _metadata_cache
+    if added_by is None:
+        added_by = _default_added_by()
     try:
         wing = sanitize_name(wing, "wing")
         room = sanitize_name(room, "room")
@@ -1070,6 +1129,7 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general", wing: 
                     "topic": topic,
                     "type": "diary_entry",
                     "agent": agent_name,
+                    "added_by": _default_added_by(),
                     "filed_at": now.isoformat(),
                     "date": now.strftime("%Y-%m-%d"),
                 }
@@ -1838,7 +1898,8 @@ def _restore_stdout():
 
 def main():
     _restore_stdout()
-    logger.info("MemPalace MCP Server starting...")
+    _setup_logging(_args.transport)
+    logger.info(f"MemPalace MCP Server starting (transport={_args.transport})...")
     try:
         from .palace import reap_stale_locks
 
@@ -1847,6 +1908,16 @@ def main():
             logger.info(f"reaped {reaped} stale mine_lock files")
     except Exception as e:
         logger.warning(f"lock reaper skipped: {e}")
+
+    if _args.transport == "http":
+        import uvicorn
+
+        from .http_server import build_app
+
+        logger.info(f"binding http://{_args.host}:{_args.port}")
+        uvicorn.run(build_app(), host=_args.host, port=_args.port, log_config=None)
+        return
+
     while True:
         try:
             line = sys.stdin.readline()

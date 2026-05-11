@@ -51,8 +51,9 @@ chroma = "mempalace.backends.chroma:ChromaBackend"
 [project.entry-points."mempalace.sources"]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0", "pytest-cov>=4.0", "ruff>=0.4.0", "psutil>=5.9"]
+dev = ["pytest>=7.0", "pytest-cov>=4.0", "ruff>=0.4.0", "psutil>=5.9", "httpx>=0.27"]
 spellcheck = ["autocorrect>=2.0"]
+http = ["starlette>=0.40", "uvicorn>=0.30"]
 
 [dependency-groups]
 dev = ["pytest>=7.0", "pytest-cov>=4.0", "ruff>=0.4.0", "psutil>=5.9"]
