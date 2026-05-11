@@ -61,7 +61,6 @@ from .config import (  # noqa: E402
 from .version import __version__  # noqa: E402
 from .backends.chroma import ChromaBackend, ChromaCollection  # noqa: E402
 from .query_sanitizer import sanitize_query  # noqa: E402
-from .searcher import search_memories  # noqa: E402
 from .palace_graph import (  # noqa: E402
     traverse,
     find_tunnels,
@@ -73,6 +72,7 @@ from .palace_graph import (  # noqa: E402
 )
 
 from .knowledge_graph import KnowledgeGraph  # noqa: E402
+from . import palace_sql  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
 logger = logging.getLogger("mempalace_mcp")
@@ -371,37 +371,34 @@ def _sanitize_optional_name(value: str = None, field_name: str = "name") -> str:
 
 
 def tool_status():
-    # Use create=True only when a palace DB already exists on disk -- this
-    # bootstraps the ChromaDB collection on a valid-but-empty palace without
-    # accidentally creating a palace in a non-existent directory (#830).
-    db_exists = os.path.isfile(os.path.join(_config.palace_path, "chroma.sqlite3"))
-    col = _get_collection(create=db_exists)
-    if not col:
+    # Reads chroma.sqlite3 directly to dodge the chromadb / HNSW SIGSEGV
+    # documented in bead self-mob. The chromadb client is bypassed entirely;
+    # counts come from a read-only SQL query over the drawers metadata
+    # segment.
+    if not os.path.isfile(os.path.join(_config.palace_path, "chroma.sqlite3")):
         return _no_palace()
-    count = col.count()
-    wings = {}
-    rooms = {}
-    result = {
-        "total_drawers": count,
-        "wings": wings,
-        "rooms": rooms,
+    try:
+        summary = palace_sql.palace_summary()
+    except Exception as e:
+        logger.exception("tool_status sql summary failed")
+        return {
+            "total_drawers": 0,
+            "wings": {},
+            "rooms": {},
+            "palace_path": _config.palace_path,
+            "protocol": PALACE_PROTOCOL,
+            "aaak_dialect": AAAK_SPEC,
+            "error": str(e),
+            "partial": True,
+        }
+    return {
+        "total_drawers": summary["total"],
+        "wings": summary["wings"],
+        "rooms": summary["rooms"],
         "palace_path": _config.palace_path,
         "protocol": PALACE_PROTOCOL,
         "aaak_dialect": AAAK_SPEC,
     }
-    try:
-        all_meta = _get_cached_metadata(col)
-        for m in all_meta:
-            m = m or {}
-            w = m.get("wing", "unknown")
-            r = m.get("room", "unknown")
-            wings[w] = wings.get(w, 0) + 1
-            rooms[r] = rooms.get(r, 0) + 1
-    except Exception as e:
-        logger.exception("tool_status metadata fetch failed")
-        result["error"] = str(e)
-        result["partial"] = True
-    return result
 
 
 # ── AAAK Dialect Spec ─────────────────────────────────────────────────────────
@@ -444,22 +441,14 @@ When WRITING AAAK: use entity codes, mark emotions, keep structure tight."""
 
 
 def tool_list_wings():
-    col = _get_collection()
-    if not col:
+    # See tool_status — chromadb bypass via palace_sql (bead self-mob).
+    if not os.path.isfile(os.path.join(_config.palace_path, "chroma.sqlite3")):
         return _no_palace()
-    wings = {}
-    result = {"wings": wings}
     try:
-        all_meta = _get_cached_metadata(col)
-        for m in all_meta:
-            m = m or {}
-            w = m.get("wing", "unknown")
-            wings[w] = wings.get(w, 0) + 1
+        return {"wings": palace_sql.list_wings()}
     except Exception as e:
-        logger.exception("tool_list_wings metadata fetch failed")
-        result["error"] = str(e)
-        result["partial"] = True
-    return result
+        logger.exception("tool_list_wings sql failed")
+        return {"wings": {}, "error": str(e), "partial": True}
 
 
 def tool_list_rooms(wing: str = None):
@@ -467,23 +456,14 @@ def tool_list_rooms(wing: str = None):
         wing = _sanitize_optional_name(wing, "wing")
     except ValueError as e:
         return {"error": str(e)}
-    col = _get_collection()
-    if not col:
+    if not os.path.isfile(os.path.join(_config.palace_path, "chroma.sqlite3")):
         return _no_palace()
-    rooms = {}
-    result = {"wing": wing or "all", "rooms": rooms}
     try:
-        where = {"wing": wing} if wing else None
-        all_meta = _fetch_all_metadata(col, where=where)
-        for m in all_meta:
-            m = m or {}
-            r = m.get("room", "unknown")
-            rooms[r] = rooms.get(r, 0) + 1
+        rooms = palace_sql.list_rooms(wing)
+        return {"wing": wing or "all", "rooms": rooms}
     except Exception as e:
-        logger.exception("tool_list_rooms metadata fetch failed")
-        result["error"] = str(e)
-        result["partial"] = True
-    return result
+        logger.exception("tool_list_rooms sql failed")
+        return {"wing": wing or "all", "rooms": {}, "error": str(e), "partial": True}
 
 
 def tool_get_taxonomy():
@@ -517,27 +497,35 @@ def tool_search(
     min_similarity: float = None,
     context: str = None,
 ):
+    # Semantic search via chromadb is currently blocked by the SIGSEGV in
+    # bead self-mob. Fall back to substring FTS over chroma.sqlite3 so callers
+    # at least get hits; mark ``degraded`` so the caller can adjust.
     limit = max(1, min(limit, _MAX_RESULTS))
     try:
         wing = _sanitize_optional_name(wing, "wing")
         room = _sanitize_optional_name(room, "room")
     except ValueError as e:
         return {"error": str(e)}
-    # Backwards compat: accept old name
-    # Backwards compat: convert old similarity scale (higher=stricter) to
-    # distance scale (lower=stricter). Similarity 0.8 → distance 0.2.
-    dist = (1.0 - min_similarity) if min_similarity is not None else max_distance
-    # Mitigate system prompt contamination (Issue #333)
     sanitized = sanitize_query(query)
-    result = search_memories(
-        sanitized["clean_query"],
-        palace_path=_config.palace_path,
-        wing=wing,
-        room=room,
-        n_results=limit,
-        max_distance=dist,
-    )
-    # Attach sanitizer metadata for transparency
+    try:
+        hits = palace_sql.fts_search(
+            sanitized["clean_query"], wing=wing, room=room, limit=limit
+        )
+    except Exception as e:
+        logger.exception("tool_search fts failed")
+        return {"error": f"search failed: {e}"}
+    result: dict = {
+        "query": query,
+        "filters": {"wing": wing, "room": room},
+        "results": hits,
+        "total_before_filter": len(hits),
+        "degraded": "fts-substring",
+        "degraded_reason": (
+            "semantic search disabled while bead self-mob is open; "
+            "results are substring matches via chromadb's trigram FTS index, "
+            "ordered by storage order, not relevance"
+        ),
+    }
     if sanitized["was_sanitized"]:
         result["query_sanitized"] = True
         result["sanitizer"] = {
@@ -548,6 +536,14 @@ def tool_search(
         }
     if context:
         result["context_received"] = True
+    # Honour max_distance / min_similarity by ignoring them — substring FTS
+    # has no distance metric. Surface the dropped parameters so callers can
+    # see we acknowledged them.
+    if max_distance != 1.5 or min_similarity is not None:
+        result["ignored_params"] = {
+            "max_distance": max_distance,
+            "min_similarity": min_similarity,
+        }
     return result
 
 
@@ -845,25 +841,19 @@ def tool_delete_drawer(drawer_id: str):
 
 
 def tool_get_drawer(drawer_id: str):
-    """Fetch a single drawer by ID. Returns full content and metadata."""
-    col = _get_collection()
-    if not col:
+    """Fetch a single drawer by ID. Returns full content and metadata.
+
+    Reads chroma.sqlite3 directly — see bead self-mob.
+    """
+    if not os.path.isfile(os.path.join(_config.palace_path, "chroma.sqlite3")):
         return _no_palace()
     try:
-        result = col.get(ids=[drawer_id], include=["documents", "metadatas"])
-        if not result["ids"]:
-            return {"error": f"Drawer not found: {drawer_id}"}
-        meta = result["metadatas"][0]
-        doc = result["documents"][0]
-        return {
-            "drawer_id": drawer_id,
-            "content": doc,
-            "wing": meta.get("wing", ""),
-            "room": meta.get("room", ""),
-            "metadata": meta,
-        }
+        detail = palace_sql.get_drawer(drawer_id)
     except Exception as e:
         return {"error": str(e)}
+    if detail is None:
+        return {"error": f"Drawer not found: {drawer_id}"}
+    return detail
 
 
 def tool_list_drawers(wing: str = None, room: str = None, limit: int = 20, offset: int = 0):
@@ -875,46 +865,20 @@ def tool_list_drawers(wing: str = None, room: str = None, limit: int = 20, offse
         room = _sanitize_optional_name(room, "room")
     except ValueError as e:
         return {"error": str(e)}
-    col = _get_collection()
-    if not col:
+    if not os.path.isfile(os.path.join(_config.palace_path, "chroma.sqlite3")):
         return _no_palace()
     try:
-        where = None
-        conditions = []
-        if wing:
-            conditions.append({"wing": wing})
-        if room:
-            conditions.append({"room": room})
-        if len(conditions) == 1:
-            where = conditions[0]
-        elif len(conditions) > 1:
-            where = {"$and": conditions}
-
-        kwargs = {"include": ["documents", "metadatas"], "limit": limit, "offset": offset}
-        if where:
-            kwargs["where"] = where
-        result = col.get(**kwargs)
-
-        drawers = []
-        for i, did in enumerate(result["ids"]):
-            meta = result["metadatas"][i]
-            doc = result["documents"][i]
-            drawers.append(
-                {
-                    "drawer_id": did,
-                    "wing": meta.get("wing", ""),
-                    "room": meta.get("room", ""),
-                    "content_preview": doc[:200] + "..." if len(doc) > 200 else doc,
-                }
-            )
-        return {
-            "drawers": drawers,
-            "count": len(drawers),
-            "offset": offset,
-            "limit": limit,
-        }
+        drawers = palace_sql.list_drawers(
+            wing=wing, room=room, offset=offset, limit=limit
+        )
     except Exception as e:
         return {"error": str(e)}
+    return {
+        "drawers": drawers,
+        "count": len(drawers),
+        "offset": offset,
+        "limit": limit,
+    }
 
 
 def tool_update_drawer(drawer_id: str, content: str = None, wing: str = None, room: str = None):
