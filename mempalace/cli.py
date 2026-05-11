@@ -729,6 +729,39 @@ def cmd_status(args):
     status(palace_path=palace_path)
 
 
+def cmd_doctor(args) -> int:
+    """Health-check the running daemon, queue, HNSW, and WAL.
+
+    Exits 0 if all checks pass, 1 on any WARN, 2 on any FAIL. The exit
+    codes let monitor scripts and CI gates consume this command.
+    """
+    import sys
+    from .health import FAIL, OK, WARN, overall_status, run_checks
+
+    palace_path = (
+        os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+    )
+    port = getattr(args, "port", 9876)
+
+    if sys.stdout.isatty():
+        colors = {OK: "\033[32m", WARN: "\033[33m", FAIL: "\033[31m"}
+        reset = "\033[0m"
+    else:
+        colors = {OK: "", WARN: "", FAIL: ""}
+        reset = ""
+
+    checks = run_checks(palace_path=palace_path, daemon_port=port)
+    name_w = max(len(c.name) for c in checks)
+    for c in checks:
+        c_color = colors.get(c.status, "")
+        print(f"  {c_color}[{c.status:4s}]{reset} {c.name:<{name_w}}  {c.detail}")
+
+    overall = overall_status(checks)
+    badge = {OK: "ALL GOOD", WARN: "WARNINGS", FAIL: "FAILURES"}[overall]
+    print(f"\n  {colors.get(overall, '')}{badge}{reset}")
+    return {OK: 0, WARN: 1, FAIL: 2}[overall]
+
+
 def cmd_repair_status(args):
     """Read-only HNSW capacity health check (#1222)."""
     from .repair import status as repair_status
@@ -1480,6 +1513,18 @@ def main():
         help="Compare sqlite vs HNSW element counts (read-only; never opens a chromadb client)",
     )
 
+    # doctor — end-to-end health summary (daemon + queue + HNSW + WAL)
+    p_doctor = sub.add_parser(
+        "doctor",
+        help="Run health checks against the running daemon and palace state",
+    )
+    p_doctor.add_argument(
+        "--port",
+        type=int,
+        default=9876,
+        help="HTTP daemon port to probe (default: 9876)",
+    )
+
     # mcp
     sub.add_parser(
         "mcp",
@@ -1538,10 +1583,13 @@ def main():
         "wake-up": cmd_wakeup,
         "repair": cmd_repair,
         "repair-status": cmd_repair_status,
+        "doctor": cmd_doctor,
         "migrate": cmd_migrate,
         "status": cmd_status,
     }
-    dispatch[args.command](args)
+    rc = dispatch[args.command](args)
+    if isinstance(rc, int):
+        sys.exit(rc)
 
 
 if __name__ == "__main__":

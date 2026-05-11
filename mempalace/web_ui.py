@@ -78,7 +78,7 @@ def _layout(title: str, body: str) -> str:
         '<a href="/ui/search">search</a>'
         '<a href="/ui/recent">recent</a>'
         '<a href="/ui/kg">kg</a>'
-        '<a href="/healthz">health</a>'
+        '<a href="/ui/health">health</a>'
         '<span class="spacer"></span>'
         f'<span class="ver">v{_esc(mcp_server.__version__)}</span>'
         "</header>"
@@ -433,3 +433,54 @@ def render_kg_entity(name: str) -> str:
     tl = _d(mcp_server.tool_kg_timeline(entity=name)).get("timeline", []) or []
     parts.append(_kg_timeline_table(tl))
     return _layout(f"kg · {name}", "".join(parts))
+
+
+# ── health dashboard ──────────────────────────────────────────────────────
+
+
+_STATUS_COLORS = {
+    "ok": "#3fb950",
+    "warn": "#d29922",
+    "fail": "#f85149",
+}
+
+
+def render_health() -> str:
+    from . import health
+
+    checks = health.run_checks()
+    overall = health.overall_status(checks)
+    parts: list[str] = [_crumb([("palace", "/ui/"), ("health", None)])]
+    parts.append("<h1>health</h1>")
+    overall_color = _STATUS_COLORS.get(overall, "#7d8590")
+    badge_text = {"ok": "ALL GOOD", "warn": "WARNINGS", "fail": "FAILURES"}[overall]
+    parts.append(
+        f'<div class="meta" style="font-size:14px">'
+        f'<span style="display:inline-block;background:{overall_color};color:#0d1117;'
+        f'padding:2px 10px;border-radius:10px;font-weight:600">{badge_text}</span>'
+        f'</div>'
+    )
+    parts.append(
+        '<table><thead><tr><th>check</th><th>status</th><th>detail</th></tr></thead><tbody>'
+    )
+    for c in checks:
+        color = _STATUS_COLORS.get(c.status, "#7d8590")
+        parts.append(
+            "<tr>"
+            f"<td><code>{_esc(c.name)}</code></td>"
+            f'<td><span style="display:inline-block;background:{color};color:#0d1117;'
+            f'padding:1px 6px;border-radius:8px;font-size:11px;text-transform:uppercase">'
+            f"{_esc(c.status)}</span></td>"
+            f"<td>{_esc(c.detail)}</td>"
+            "</tr>"
+        )
+    parts.append("</tbody></table>")
+    parts.append(
+        '<div class="small">'
+        "Checks live in <code>mempalace.health</code>. "
+        'Run from the shell with <code>mempalace doctor</code> (exit code 0=ok, 1=warn, 2=fail). '
+        'The same checks back the launchd watcher at '
+        '<code>scripts/cloud.skyvafnir.mempalace.monitor.plist</code>.'
+        "</div>"
+    )
+    return _layout("health", "".join(parts))

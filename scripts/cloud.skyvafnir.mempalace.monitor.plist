@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>cloud.skyvafnir.mempalace.monitor</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/gzur/.mempalace-env/bin/python</string>
+        <string>/Users/gzur/repos/mempalace/scripts/mempalace_monitor.py</string>
+    </array>
+
+    <!--
+        Every 5 minutes. Cheap (~0.2s per tick) so the cadence buys
+        responsiveness without measurable CPU cost.
+    -->
+    <key>StartInterval</key>
+    <integer>300</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/gzur/.mempalace/logs/monitor.stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/gzur/.mempalace/logs/monitor.stderr.log</string>
+
+    <!--
+        Inherit the user's PATH so ``bd`` and ``osascript`` resolve. Without
+        this the launchd default PATH would miss /opt/homebrew/bin.
+    -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>

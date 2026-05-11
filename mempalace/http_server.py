@@ -158,6 +158,10 @@ async def ui_kg_entity(request: Request) -> Response:
     return await _render(lambda: web_ui.render_kg_entity(name))
 
 
+async def ui_health(_: Request) -> Response:
+    return await _render(web_ui.render_health)
+
+
 async def root(_: Request) -> Response:
     return RedirectResponse("/ui/", status_code=307)
 
@@ -176,5 +180,6 @@ def build_app() -> Starlette:
             Route("/ui/recent", ui_recent, methods=["GET"]),
             Route("/ui/kg", ui_kg, methods=["GET"]),
             Route("/ui/kg/entity", ui_kg_entity, methods=["GET"]),
+            Route("/ui/health", ui_health, methods=["GET"]),
         ]
     )
