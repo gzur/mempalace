@@ -30,11 +30,18 @@
     <!--
         Inherit the user's PATH so ``bd`` and ``osascript`` resolve. Without
         this the launchd default PATH would miss /opt/homebrew/bin.
+
+        ``BEADS_DIR`` points ``bd`` at the global beads database. Without it,
+        ``bd create`` fails with "no beads database found" because launchd
+        spawns the monitor outside the user's shell, so the BEADS_DIR set in
+        ``.zshrc`` is not inherited.
     -->
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>BEADS_DIR</key>
+        <string>/Users/gzur/self/.beads</string>
     </dict>
 </dict>
 </plist>
