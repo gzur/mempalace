@@ -706,15 +706,8 @@ def quarantine_invalid_hnsw_metadata(palace_path: str) -> list[str]:
                 dimensionality, id_to_label = _persisted_metadata_fields(persisted)
                 if id_to_label is not None and not isinstance(id_to_label, dict):
                     reason = f"invalid id_to_label type {type(id_to_label).__name__}"
-                else:
-                    has_labels = bool(id_to_label)
-                    if has_labels and not _valid_dimensionality(dimensionality):
-                        reason = (
-                            "labels present but dimensionality is missing or invalid "
-                            f"({dimensionality!r})"
-                        )
-                    elif dimensionality is not None and not _valid_dimensionality(dimensionality):
-                        reason = f"invalid dimensionality {dimensionality!r}"
+                elif dimensionality is not None and not _valid_dimensionality(dimensionality):
+                    reason = f"invalid dimensionality {dimensionality!r}"
 
         if reason is None:
             continue

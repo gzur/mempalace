@@ -821,9 +821,9 @@ def test_make_client_quarantines_only_on_first_call_per_palace(tmp_path, monkeyp
     ChromaBackend.make_client(palace_path)
     ChromaBackend.make_client(palace_path)
 
-    assert calls == [
-        palace_path
-    ], "quarantine_stale_hnsw should fire once per palace per process, not on every reconnect"
+    assert calls == [palace_path], (
+        "quarantine_stale_hnsw should fire once per palace per process, not on every reconnect"
+    )
 
 
 def test_make_client_gates_invalid_metadata_on_first_call(tmp_path, monkeypatch):
@@ -939,9 +939,9 @@ def test_client_quarantines_only_on_first_call_per_palace(tmp_path, monkeypatch)
     finally:
         backend.close()
 
-    assert (
-        calls == [palace_path]
-    ), "quarantine_stale_hnsw should fire once per palace per process from _client(), not on every call"
+    assert calls == [palace_path], (
+        "quarantine_stale_hnsw should fire once per palace per process from _client(), not on every call"
+    )
 
 
 # ── _pin_hnsw_threads (per-process retrofit, separate from this PR's gate) ──
@@ -993,7 +993,13 @@ def test_get_collection_applies_retrofit_on_existing_palace(tmp_path):
     assert wrapper._collection.configuration_json["hnsw"]["num_threads"] == 1
 
 
-def test_quarantine_invalid_hnsw_metadata_renames_missing_dimensionality(tmp_path):
+def test_quarantine_invalid_hnsw_metadata_allows_missing_dimensionality(tmp_path):
+    # chromadb 1.5.x with the Rust bindings persists index_metadata.pickle
+    # without setting dimensionality even when id_to_label is populated. The
+    # field is Optional[int] on PersistentData and the Rust persistence path
+    # leaves it None; the Rust loader re-derives dimensionality from
+    # data_level0.bin. Empirically verified on a 72,306-element rebuilt
+    # segment that loaded cleanly via PersistentClient.count() and query().
     palace = tmp_path / "palace"
     palace.mkdir()
     seg = palace / "abcd-1234-5678"
@@ -1003,9 +1009,8 @@ def test_quarantine_invalid_hnsw_metadata_renames_missing_dimensionality(tmp_pat
 
     moved = quarantine_invalid_hnsw_metadata(str(palace))
 
-    assert len(moved) == 1
-    assert ".corrupt-" in moved[0]
-    assert not seg.exists()
+    assert moved == []
+    assert seg.exists()
 
 
 def test_quarantine_invalid_hnsw_metadata_allows_uninitialized_segment(tmp_path):
