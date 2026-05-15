@@ -12,7 +12,11 @@ directly in read-only mode; only the KG views and WAL read still go through
 
 from __future__ import annotations
 
+import datetime as _dt
 import html
+import json
+from collections import OrderedDict, defaultdict
+from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from . import mcp_server, palace_sql
@@ -50,6 +54,12 @@ input[type=submit]{background:#238636;border:0;color:#fff;padding:6px 14px;font-
 input[type=submit]:hover{background:#2ea043}
 .pager{margin:12px 0;display:flex;gap:14px}
 .pill{display:inline-block;background:#21262d;color:#c9d1d9;padding:1px 6px;border-radius:10px;font-size:11px;margin-right:4px}
+.chart{display:block;width:100%;height:auto;background:#161b22;border:1px solid #21262d;border-radius:6px;padding:8px;margin:8px 0}
+.chart text{fill:#7d8590;font-size:10px;font-family:ui-monospace,monospace}
+.chart .axis{stroke:#30363d;stroke-width:1}
+.chart .baseline{stroke:#30363d;stroke-width:1}
+.swatch{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:middle}
+.grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-top:16px}
 """
 
 
@@ -77,6 +87,7 @@ def _layout(title: str, body: str) -> str:
         '<a href="/ui/">palace</a>'
         '<a href="/ui/search">search</a>'
         '<a href="/ui/recent">recent</a>'
+        '<a href="/ui/operations">operations</a>'
         '<a href="/ui/kg">kg</a>'
         '<a href="/ui/health">health</a>'
         '<span class="spacer"></span>'
@@ -108,7 +119,7 @@ def _ops_table(ops: Iterable[dict]) -> str:
     ops_list = list(ops)
     if not ops_list:
         return '<div class="meta">no operations recorded yet</div>'
-    rows = ['<table><thead><tr><th>ts</th><th>op</th><th>details</th></tr></thead><tbody>']
+    rows = ["<table><thead><tr><th>ts</th><th>op</th><th>details</th></tr></thead><tbody>"]
     for op in reversed(ops_list):  # newest first
         ts = op.get("ts") or op.get("timestamp") or op.get("filed_at") or ""
         kind = op.get("op") or op.get("operation") or op.get("kind") or ""
@@ -150,7 +161,7 @@ def render_index() -> str:
     parts.append("<h1>palace</h1>")
     parts.append(
         f'<div class="meta">{summary["total"]:,} drawers · '
-        f'<code>{_esc(mcp_server._config.palace_path)}</code></div>'
+        f"<code>{_esc(mcp_server._config.palace_path)}</code></div>"
     )
 
     parts.append(
@@ -183,9 +194,7 @@ def render_wing(wing: str) -> str:
     parts: list[str] = [_crumb([("palace", "/ui/"), (wing, None)])]
     parts.append(f"<h1>{_esc(wing)}</h1>")
     parts.append(f'<div class="meta">{total:,} drawers · {len(rooms)} rooms</div>')
-    parts.append(
-        '<table><thead><tr><th>room</th><th class="num">drawers</th></tr></thead><tbody>'
-    )
+    parts.append('<table><thead><tr><th>room</th><th class="num">drawers</th></tr></thead><tbody>')
     for r, c in rooms:
         parts.append(
             f'<tr><td><a href="/ui/wing/{_esc(wing)}/{_esc(r)}">{_esc(r)}</a></td>'
@@ -199,23 +208,19 @@ def render_room(wing: str, room: str, offset: int, limit: int) -> str:
     offset = max(0, offset)
     limit = max(1, min(200, limit))
     drawers = palace_sql.list_drawers(wing=wing, room=room, offset=offset, limit=limit)
-    parts: list[str] = [
-        _crumb([("palace", "/ui/"), (wing, f"/ui/wing/{wing}"), (room, None)])
-    ]
+    parts: list[str] = [_crumb([("palace", "/ui/"), (wing, f"/ui/wing/{wing}"), (room, None)])]
     parts.append(f"<h1>{_esc(wing)} / {_esc(room)}</h1>")
     parts.append(
         f'<div class="meta">offset {offset:,} · showing {len(drawers):,} · limit {limit}</div>'
     )
     if drawers:
-        parts.append(
-            '<table><thead><tr><th>id</th><th>preview</th></tr></thead><tbody>'
-        )
+        parts.append("<table><thead><tr><th>id</th><th>preview</th></tr></thead><tbody>")
         for d in drawers:
             did = d["drawer_id"]
             short_id = did[:48] + ("…" if len(did) > 48 else "")
             parts.append(
                 f'<tr><td><a href="/ui/drawer/{_esc(did)}"><code>{_esc(short_id)}</code></a></td>'
-                f'<td>{_esc(d["content_preview"])}</td></tr>'
+                f"<td>{_esc(d['content_preview'])}</td></tr>"
             )
         parts.append("</tbody></table>")
     pager: list[str] = []
@@ -237,8 +242,7 @@ def render_drawer(drawer_id: str) -> str:
     detail = palace_sql.get_drawer(drawer_id)
     if detail is None:
         body = _crumb([("palace", "/ui/")]) + (
-            "<h1>drawer not found</h1>"
-            f'<div class="meta"><code>{_esc(drawer_id)}</code></div>'
+            f'<h1>drawer not found</h1><div class="meta"><code>{_esc(drawer_id)}</code></div>'
         )
         return _layout("drawer", body)
     wing = detail.get("wing", "") or ""
@@ -292,7 +296,7 @@ def render_search(q: str, wing: Optional[str], room: Optional[str], limit: int) 
         parts.append('<div class="meta">no hits</div>')
     else:
         parts.append(
-            '<table><thead><tr><th>drawer</th><th>wing / room</th><th>snippet</th></tr></thead><tbody>'
+            "<table><thead><tr><th>drawer</th><th>wing / room</th><th>snippet</th></tr></thead><tbody>"
         )
         for h in hits:
             did = h.get("drawer_id", "")
@@ -303,7 +307,7 @@ def render_search(q: str, wing: Optional[str], room: Optional[str], limit: int) 
                 "<tr>"
                 f'<td><a href="/ui/drawer/{_esc(did)}"><code>{_esc(short_id)}</code></a></td>'
                 f'<td><a href="/ui/wing/{_esc(w)}/{_esc(r)}"><code>{_esc(w)}/{_esc(r)}</code></a></td>'
-                f'<td>{_esc(h.get("snippet", ""))}</td>'
+                f"<td>{_esc(h.get('snippet', ''))}</td>"
                 "</tr>"
             )
         parts.append("</tbody></table>")
@@ -364,12 +368,8 @@ def render_kg() -> str:
     parts: list[str] = [_crumb([("palace", "/ui/"), ("kg", None)])]
     parts.append("<h1>knowledge graph</h1>")
     parts.append("<table><tbody>")
-    parts.append(
-        f'<tr><th>entities</th><td class="num">{stats.get("entities", 0):,}</td></tr>'
-    )
-    parts.append(
-        f'<tr><th>triples</th><td class="num">{stats.get("triples", 0):,}</td></tr>'
-    )
+    parts.append(f'<tr><th>entities</th><td class="num">{stats.get("entities", 0):,}</td></tr>')
+    parts.append(f'<tr><th>triples</th><td class="num">{stats.get("triples", 0):,}</td></tr>')
     parts.append(
         f'<tr><th>current facts</th><td class="num">{stats.get("current_facts", 0):,}</td></tr>'
     )
@@ -387,9 +387,7 @@ def render_kg() -> str:
     if preds:
         parts.append("<h2>predicates</h2>")
         parts.append(
-            '<div class="meta">'
-            + ", ".join(f"<code>{_esc(p)}</code>" for p in preds)
-            + "</div>"
+            '<div class="meta">' + ", ".join(f"<code>{_esc(p)}</code>" for p in preds) + "</div>"
         )
     parts.append("<h2>recent timeline</h2>")
     parts.append(_kg_timeline_table(tl))
@@ -422,7 +420,7 @@ def render_kg_entity(name: str) -> str:
                 "<tr>"
                 f'<td class="small">{_esc(f.get("direction", ""))}</td>'
                 f'<td><a href="/ui/kg/entity?name={_esc(sub)}">{_esc(sub)}</a></td>'
-                f'<td>{_esc(f.get("predicate", ""))}</td>'
+                f"<td>{_esc(f.get('predicate', ''))}</td>"
                 f'<td><a href="/ui/kg/entity?name={_esc(obj)}">{_esc(obj)}</a></td>'
                 f'<td class="small">{_esc(f.get("valid_from", ""))}</td>'
                 f'<td class="small">{_esc(f.get("valid_to", ""))}</td>'
@@ -458,10 +456,10 @@ def render_health() -> str:
         f'<div class="meta" style="font-size:14px">'
         f'<span style="display:inline-block;background:{overall_color};color:#0d1117;'
         f'padding:2px 10px;border-radius:10px;font-weight:600">{badge_text}</span>'
-        f'</div>'
+        f"</div>"
     )
     parts.append(
-        '<table><thead><tr><th>check</th><th>status</th><th>detail</th></tr></thead><tbody>'
+        "<table><thead><tr><th>check</th><th>status</th><th>detail</th></tr></thead><tbody>"
     )
     for c in checks:
         color = _STATUS_COLORS.get(c.status, "#7d8590")
@@ -478,9 +476,322 @@ def render_health() -> str:
     parts.append(
         '<div class="small">'
         "Checks live in <code>mempalace.health</code>. "
-        'Run from the shell with <code>mempalace doctor</code> (exit code 0=ok, 1=warn, 2=fail). '
-        'The same checks back the launchd watcher at '
-        '<code>scripts/cloud.skyvafnir.mempalace.monitor.plist</code>.'
+        "Run from the shell with <code>mempalace doctor</code> (exit code 0=ok, 1=warn, 2=fail). "
+        "The same checks back the launchd watcher at "
+        "<code>scripts/cloud.skyvafnir.mempalace.monitor.plist</code>."
         "</div>"
     )
     return _layout("health", "".join(parts))
+
+
+# ── /ui/operations ────────────────────────────────────────────────────────
+#
+# Time-series chart of WAL operations. WAL is ``~/.mempalace/wal/write_log.jsonl``,
+# the same file ``mcp_server.tool_recent_ops`` reads at :1140.
+
+_WAL_PATH = Path("~/.mempalace/wal/write_log.jsonl").expanduser()
+
+_OP_TYPES = ("add_drawer", "diary_write", "update_drawer", "kg_add", "delete_drawer")
+
+_OPS_PALETTE = {
+    "add_drawer": "#58a6ff",
+    "diary_write": "#3fb950",
+    "update_drawer": "#d29922",
+    "kg_add": "#bc8cff",
+    "delete_drawer": "#f85149",
+}
+
+
+def _load_wal_ops(path: Path, since_days: int) -> list[dict]:
+    """Stream the WAL, parse, filter to the last N days. Tolerant of malformed lines.
+
+    Mirrors the malformed-line tolerance from ``mcp_server.tool_recent_ops``: a bad
+    line is skipped, not raised, so a half-written final line during daemon crash
+    doesn't take down the chart.
+    """
+    if not path.is_file():
+        return []
+    cutoff = _dt.datetime.now() - _dt.timedelta(days=since_days)
+    out: list[dict] = []
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                ts = rec.get("timestamp") or ""
+                try:
+                    dt = _dt.datetime.fromisoformat(ts)
+                except (TypeError, ValueError):
+                    continue
+                if dt < cutoff:
+                    continue
+                rec["_dt"] = dt
+                out.append(rec)
+    except OSError:
+        return []
+    out.sort(key=lambda r: r["_dt"])
+    return out
+
+
+def _bucket_key(dt: _dt.datetime, bucket: str) -> str:
+    if bucket == "hour":
+        return dt.strftime("%Y-%m-%d %H:00")
+    return dt.strftime("%Y-%m-%d")
+
+
+def _bucket_ops(ops: list[dict], bucket: str) -> "OrderedDict[str, dict[str, int]]":
+    """Group ops by (time-bucket, op_type). Returns ordered dict (oldest first)."""
+    out: "OrderedDict[str, dict[str, int]]" = OrderedDict()
+    for op in ops:
+        key = _bucket_key(op["_dt"], bucket)
+        if key not in out:
+            out[key] = {t: 0 for t in _OP_TYPES}
+            out[key]["_other"] = 0
+        kind = op.get("operation") or "_other"
+        if kind in out[key]:
+            out[key][kind] += 1
+        else:
+            out[key]["_other"] += 1
+    return out
+
+
+def _fill_bucket_range(
+    binned: "OrderedDict[str, dict[str, int]]",
+    bucket: str,
+    days: int,
+) -> "OrderedDict[str, dict[str, int]]":
+    """Insert empty buckets so the x-axis has the full requested range, not just
+    the buckets with data. Hourly: last ``days * 24`` hours. Daily: last ``days``
+    days. The result is a NEW ordered dict; the input is not mutated.
+    """
+    empty = {t: 0 for t in _OP_TYPES}
+    empty["_other"] = 0
+    out: "OrderedDict[str, dict[str, int]]" = OrderedDict()
+    now = _dt.datetime.now()
+    if bucket == "hour":
+        steps = days * 24
+        for i in range(steps - 1, -1, -1):
+            t = now - _dt.timedelta(hours=i)
+            t = t.replace(minute=0, second=0, microsecond=0)
+            key = _bucket_key(t, bucket)
+            out[key] = dict(binned.get(key, empty))
+    else:
+        for i in range(days - 1, -1, -1):
+            t = now - _dt.timedelta(days=i)
+            key = _bucket_key(t, bucket)
+            out[key] = dict(binned.get(key, empty))
+    return out
+
+
+def _render_range_form(days: int, bucket: str) -> str:
+    days_opts = [1, 7, 30, 90, 365]
+    bucket_opts = [("auto", ""), ("hour", "hour"), ("day", "day")]
+    days_html = "".join(
+        f'<option value="{d}"{" selected" if d == days else ""}>{d}d</option>' for d in days_opts
+    )
+    bucket_html = "".join(
+        f'<option value="{v}"{" selected" if v == bucket else ""}>{label}</option>'
+        for label, v in bucket_opts
+    )
+    return (
+        '<form method="get">'
+        '<label class="small">range '
+        f'<select name="days">{days_html}</select></label> '
+        '<label class="small">bucket '
+        f'<select name="bucket">{bucket_html}</select></label> '
+        '<input type="submit" value="apply">'
+        "</form>"
+    )
+
+
+def _render_ops_chart_svg(
+    binned: "OrderedDict[str, dict[str, int]]",
+    op_types: tuple[str, ...],
+    bucket: str,
+) -> str:
+    if not binned:
+        return '<div class="meta">no operations recorded in this range</div>'
+
+    keys = list(binned.keys())
+    n = len(keys)
+    totals = [sum(binned[k][t] for t in op_types) + binned[k].get("_other", 0) for k in keys]
+    y_max = max(totals) if any(totals) else 1
+
+    # SVG layout
+    pad_l, pad_r, pad_t, pad_b = 36, 8, 12, 28
+    bar_w_max = 24
+    bar_w = max(2, min(bar_w_max, (700 - pad_l - pad_r) // max(n, 1)))
+    inner_w = bar_w * n
+    width = pad_l + inner_w + pad_r
+    height = 220
+    plot_h = height - pad_t - pad_b
+    bar_gap = max(1, bar_w // 6)
+
+    rects: list[str] = []
+    for i, k in enumerate(keys):
+        x = pad_l + i * bar_w + bar_gap // 2
+        running = 0
+        for t in op_types:
+            count = binned[k].get(t, 0)
+            if count <= 0:
+                continue
+            h = (count / y_max) * plot_h
+            y = pad_t + plot_h - (running + h)
+            running += h
+            rects.append(
+                f'<rect x="{x}" y="{y:.1f}" width="{bar_w - bar_gap}" height="{h:.1f}" '
+                f'fill="{_OPS_PALETTE[t]}">'
+                f"<title>{_esc(k)} · {_esc(t)}: {count}</title>"
+                "</rect>"
+            )
+
+    # axis + labels
+    axis_y0 = pad_t + plot_h
+    axes = [
+        f'<line class="baseline" x1="{pad_l}" y1="{axis_y0}" x2="{width - pad_r}" y2="{axis_y0}"/>'
+    ]
+    for frac, label in ((0, 0), (0.5, y_max / 2), (1.0, y_max)):
+        y = pad_t + plot_h - frac * plot_h
+        axes.append(f'<line class="axis" x1="{pad_l}" y1="{y}" x2="{width - pad_r}" y2="{y}"/>')
+        axes.append(f'<text x="{pad_l - 6}" y="{y + 3}" text-anchor="end">{label:g}</text>')
+
+    # tick labels: first, middle, last; skip rest to avoid overlap
+    tick_positions = sorted({0, n // 2, n - 1}) if n > 1 else [0]
+    for ti in tick_positions:
+        cx = pad_l + ti * bar_w + bar_w / 2
+        text = keys[ti]
+        if bucket == "hour":
+            text = text[5:]  # "MM-DD HH:00"
+        axes.append(
+            f'<text x="{cx:.1f}" y="{height - pad_b + 14}" text-anchor="middle">{_esc(text)}</text>'
+        )
+
+    return (
+        f'<svg class="chart" viewBox="0 0 {width} {height}" '
+        f'preserveAspectRatio="none" role="img" aria-label="operations over time">'
+        + "".join(axes)
+        + "".join(rects)
+        + "</svg>"
+    )
+
+
+def _wing_for_op(op: dict) -> Optional[str]:
+    """Best-effort wing extraction for the wing-breakdown table."""
+    params = op.get("params") or {}
+    if not isinstance(params, dict):
+        return None
+    for k in ("wing", "new_wing", "old_wing"):
+        v = params.get(k)
+        if v:
+            return str(v)
+    agent = params.get("agent_name")
+    if agent:
+        return f"agents/{agent}"
+    return None
+
+
+def _render_ops_summary(
+    ops: list[dict],
+    binned: "OrderedDict[str, dict[str, int]]",
+    op_types: tuple[str, ...],
+    days: int,
+) -> str:
+    total = len(ops)
+    avg_per_day = total / max(days, 1)
+    # busiest bucket
+    sums = [(k, sum(v[t] for t in op_types) + v.get("_other", 0)) for k, v in binned.items()]
+    sums = [s for s in sums if s[1] > 0]
+    busiest_k, busiest_n = max(sums, key=lambda s: s[1]) if sums else ("—", 0)
+
+    # by op type
+    per_type: dict[str, int] = {t: 0 for t in op_types}
+    other = 0
+    for op in ops:
+        k = op.get("operation")
+        if k in per_type:
+            per_type[k] += 1
+        else:
+            other += 1
+
+    # by wing (top 10)
+    wing_counts: dict[str, int] = defaultdict(int)
+    for op in ops:
+        w = _wing_for_op(op)
+        if w:
+            wing_counts[w] += 1
+    top_wings = sorted(wing_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
+
+    # totals block
+    totals_html = (
+        "<div>"
+        "<h2>totals</h2>"
+        "<table><tbody>"
+        f"<tr><td>total</td><td class='num'>{total:,}</td></tr>"
+        f"<tr><td>avg / day</td><td class='num'>{avg_per_day:.1f}</td></tr>"
+        f"<tr><td>busiest</td><td class='num'>{_esc(busiest_k)} ({busiest_n})</td></tr>"
+        "</tbody></table>"
+        "</div>"
+    )
+
+    # by-op block
+    op_rows: list[str] = []
+    for t in op_types:
+        n = per_type[t]
+        pct = (100.0 * n / total) if total else 0.0
+        swatch = f'<span class="swatch" style="background:{_OPS_PALETTE[t]}"></span>'
+        op_rows.append(
+            f"<tr><td>{swatch}<code>{_esc(t)}</code></td>"
+            f"<td class='num'>{n:,}</td>"
+            f"<td class='num small'>{pct:.0f}%</td></tr>"
+        )
+    if other:
+        op_rows.append(
+            f"<tr><td><code>other</code></td><td class='num'>{other:,}</td>"
+            f"<td class='num small'>{(100.0 * other / total):.0f}%</td></tr>"
+        )
+    by_op_html = (
+        "<div><h2>by operation</h2>"
+        "<table><thead><tr><th>op</th><th class='num'>n</th><th class='num'>%</th></tr></thead>"
+        f"<tbody>{''.join(op_rows)}</tbody></table></div>"
+    )
+
+    # by-wing block
+    if top_wings:
+        wing_rows = "".join(
+            f"<tr><td>{_esc(w)}</td><td class='num'>{n:,}</td></tr>" for w, n in top_wings
+        )
+        by_wing_html = (
+            "<div><h2>top wings</h2>"
+            "<table><thead><tr><th>wing</th><th class='num'>n</th></tr></thead>"
+            f"<tbody>{wing_rows}</tbody></table></div>"
+        )
+    else:
+        by_wing_html = '<div><h2>top wings</h2><div class="meta">no wing info</div></div>'
+
+    return f'<div class="grid3">{totals_html}{by_op_html}{by_wing_html}</div>'
+
+
+def render_operations(days: int = 30, bucket: Optional[str] = None) -> str:
+    days = max(1, min(int(days), 365))
+    if bucket not in ("hour", "day"):
+        bucket = "hour" if days <= 2 else "day"
+
+    ops = _load_wal_ops(_WAL_PATH, since_days=days)
+    raw_binned = _bucket_ops(ops, bucket)
+    binned = _fill_bucket_range(raw_binned, bucket, days)
+
+    parts: list[str] = [_crumb([("palace", "/ui/"), ("operations", None)])]
+    parts.append("<h1>operations</h1>")
+    parts.append(
+        f'<div class="meta">{len(ops):,} ops in last {days}d · bucket={bucket} · '
+        f"source <code>{_esc(str(_WAL_PATH))}</code></div>"
+    )
+    parts.append(_render_range_form(days, bucket))
+    parts.append(_render_ops_chart_svg(binned, _OP_TYPES, bucket))
+    parts.append(_render_ops_summary(ops, binned, _OP_TYPES, days))
+    return _layout("operations", "".join(parts))

@@ -90,9 +90,7 @@ async def _render(fn: Callable[[], str]) -> Response:
     ctx = contextvars.copy_context()
     try:
         async with _dispatch_lock:
-            body = await asyncio.get_running_loop().run_in_executor(
-                _TOOL_EXECUTOR, ctx.run, fn
-            )
+            body = await asyncio.get_running_loop().run_in_executor(_TOOL_EXECUTOR, ctx.run, fn)
         return HTMLResponse(body)
     except Exception:
         logger.exception("ui render failed")
@@ -162,6 +160,17 @@ async def ui_health(_: Request) -> Response:
     return await _render(web_ui.render_health)
 
 
+async def ui_operations(request: Request) -> Response:
+    try:
+        days = int(request.query_params.get("days", "30") or "30")
+    except ValueError:
+        days = 30
+    bucket = request.query_params.get("bucket") or None
+    if bucket == "":
+        bucket = None
+    return await _render(lambda: web_ui.render_operations(days=days, bucket=bucket))
+
+
 async def root(_: Request) -> Response:
     return RedirectResponse("/ui/", status_code=307)
 
@@ -181,5 +190,6 @@ def build_app() -> Starlette:
             Route("/ui/kg", ui_kg, methods=["GET"]),
             Route("/ui/kg/entity", ui_kg_entity, methods=["GET"]),
             Route("/ui/health", ui_health, methods=["GET"]),
+            Route("/ui/operations", ui_operations, methods=["GET"]),
         ]
     )
