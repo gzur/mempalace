@@ -633,22 +633,44 @@ def _render_ops_chart_svg(
     bar_gap = max(1, bar_w // 6)
 
     rects: list[str] = []
+    overlays: list[str] = []
     for i, k in enumerate(keys):
         x = pad_l + i * bar_w + bar_gap // 2
+        col_w = bar_w - bar_gap
         running = 0
+        col_total = 0
+        breakdown_lines: list[str] = []
         for t in op_types:
             count = binned[k].get(t, 0)
+            col_total += count
+            if count > 0:
+                breakdown_lines.append(f"{t}: {count}")
             if count <= 0:
                 continue
             h = (count / y_max) * plot_h
             y = pad_t + plot_h - (running + h)
             running += h
             rects.append(
-                f'<rect x="{x}" y="{y:.1f}" width="{bar_w - bar_gap}" height="{h:.1f}" '
+                f'<rect x="{x}" y="{y:.1f}" width="{col_w}" height="{h:.1f}" '
                 f'fill="{_OPS_PALETTE[t]}">'
                 f"<title>{_esc(k)} · {_esc(t)}: {count}</title>"
                 "</rect>"
             )
+        # Full-column hover overlay: gives a big hit target so the native SVG
+        # tooltip fires even on empty buckets and stacked sub-bars. Browsers
+        # only show <title> tooltips after the cursor stops moving over the
+        # element, and stacked rects only let the topmost slice receive that
+        # hover — the overlay collapses all of it to one column-wide target
+        # with a rich, multi-line summary.
+        if col_total > 0:
+            tip = f"{k} · total {col_total}\n" + "\n".join(breakdown_lines)
+        else:
+            tip = f"{k} · no ops"
+        overlays.append(
+            f'<rect x="{x}" y="{pad_t}" width="{col_w}" height="{plot_h}" '
+            f'fill="transparent" pointer-events="all">'
+            f"<title>{_esc(tip)}</title></rect>"
+        )
 
     # axis + labels
     axis_y0 = pad_t + plot_h
@@ -676,6 +698,7 @@ def _render_ops_chart_svg(
         f'preserveAspectRatio="none" role="img" aria-label="operations over time">'
         + "".join(axes)
         + "".join(rects)
+        + "".join(overlays)
         + "</svg>"
     )
 

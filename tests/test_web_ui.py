@@ -32,9 +32,12 @@ def test_render_operations_empty_wal(tmp_path, monkeypatch):
     html = web_ui.render_operations(days=30)
 
     assert "<h1>operations</h1>" in html
-    # chart frame is rendered (empty x-axis still useful as scaffold) but no bars
+    # chart frame is rendered (empty x-axis still useful as scaffold) — no
+    # colored bars, but transparent hover overlays per column are expected so
+    # users still get a "no ops" tooltip on hover.
     assert '<svg class="chart"' in html
-    assert "<rect " not in html
+    assert 'fill="#' not in html  # no colored op_type bars
+    assert 'fill="transparent"' in html  # hover overlays present
     # totals block shows zero counts
     assert "0 ops in last 30d" in html
     assert "total" in html and "avg / day" in html
