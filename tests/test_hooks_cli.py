@@ -34,6 +34,31 @@ from mempalace.hooks_cli import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolated_existing_palace_root(monkeypatch, tmp_path):
+    """Give every test an isolated, *existing* PALACE_ROOT/STATE_DIR.
+
+    Regression for #1510: nine save / log / precompact tests assumed
+    ``~/.mempalace`` existed and only passed in the full suite because an
+    earlier test file (``test_cli.py``) created it as a side effect, so
+    the ``_palace_root_exists()`` kill-switch was satisfied. Run in
+    isolation they short-circuited and failed.
+
+    Defaulting every test to a per-test palace root that exists makes
+    them robust on their own and protects future tests from the same
+    trap. Tests that exercise the absent-root kill-switch path call
+    ``_redirect_palace_root`` (or set their own PALACE_ROOT) *after* this
+    fixture; ``monkeypatch``'s last-write-wins means they keep their
+    absent/file root and teardown still restores the real module value.
+    """
+    root = tmp_path / ".mempalace"
+    root.mkdir(exist_ok=True)
+    monkeypatch.setattr(hooks_cli_mod, "PALACE_ROOT", root)
+    monkeypatch.setattr(hooks_cli_mod, "STATE_DIR", root / "hook_state")
+    monkeypatch.setattr(hooks_cli_mod, "_state_dir_initialized", False)
+    return root
+
+
 # --- _mempalace_python ---
 
 
