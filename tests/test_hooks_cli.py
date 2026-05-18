@@ -22,6 +22,7 @@ from mempalace.hooks_cli import (
     _mine_sync,
     _parse_harness_input,
     _sanitize_session_id,
+    _sessions_wing_for_transcript,
     _validate_transcript_path,
     _wing_from_transcript_path,
     hook_stop,
@@ -343,6 +344,19 @@ def test_wing_from_transcript_path_macos_users_layout():
 def test_wing_from_transcript_path_nested_deep():
     path = "/home/bob/.claude/projects/-home-bob-work-clients-acme-frontend/session.jsonl"
     assert _wing_from_transcript_path(path) == "wing_frontend"
+
+
+# --- _sessions_wing_for_transcript ---
+
+
+def test_sessions_wing_for_transcript_appends_for_project():
+    p = "/home/gz/.claude/projects/-Users-gz-repos-mempalace/s.jsonl"
+    assert _sessions_wing_for_transcript(p) == "wing_mempalace_sessions"
+
+
+def test_sessions_wing_for_transcript_keeps_fallback_unchanged():
+    # Unrecognized path: helper falls back to wing_sessions, NOT wing__sessions.
+    assert _sessions_wing_for_transcript("/tmp/random.jsonl") == "wing_sessions"
 
 
 # --- _log ---
@@ -700,9 +714,9 @@ def test_spawn_mine_releases_slot_on_oserror(tmp_path):
             with patch("mempalace.hooks_cli.subprocess.Popen", side_effect=OSError("spawn fail")):
                 with pytest.raises(OSError):
                     _spawn_mine(cmd)
-                assert (
-                    not pid_file.exists()
-                ), "slot must be released so the next hook fire isn't permanently blocked"
+                assert not pid_file.exists(), (
+                    "slot must be released so the next hook fire isn't permanently blocked"
+                )
 
 
 def test_spawn_mine_passes_pid_file_env_var(tmp_path):
@@ -737,6 +751,23 @@ def test_ingest_transcript_uses_detached_kwargs(tmp_path):
                 assert kwargs.get("close_fds") is True
 
 
+def test_ingest_transcript_routes_to_per_project_sessions_wing(tmp_path):
+    """When the transcript path encodes a project, mine --wing is wing_<project>_sessions."""
+    project_dir = tmp_path / ".claude" / "projects" / "-Users-gz-repos-mempalace"
+    project_dir.mkdir(parents=True)
+    transcript = project_dir / "session.jsonl"
+    transcript.write_text("x" * 200)
+    with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+        with patch("mempalace.hooks_cli._MINE_PID_DIR", tmp_path / "mine_pids"):
+            with patch("mempalace.hooks_cli.subprocess.Popen") as mock_popen:
+                from mempalace.hooks_cli import _ingest_transcript
+
+                _ingest_transcript(str(transcript))
+    assert mock_popen.called
+    cmd = mock_popen.call_args[0][0]
+    assert cmd[cmd.index("--wing") + 1] == "wing_mempalace_sessions"
+
+
 def test_ingest_transcript_skips_when_target_running(tmp_path):
     """Repeated transcript ingests for the same transcript should dedup."""
     transcript = tmp_path / "session.jsonl"
@@ -756,7 +787,7 @@ def test_ingest_transcript_skips_when_target_running(tmp_path):
                     "--mode",
                     "convos",
                     "--wing",
-                    "sessions",
+                    "wing_sessions",
                 ]
                 pid_file = _pid_file_for_cmd(expected_cmd)
                 pid_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1040,10 +1071,14 @@ def test_precompact_mines_transcript_dir(tmp_path, monkeypatch):
     mock_run.assert_not_called()
     mock_popen.assert_called_once()
     cmd = mock_popen.call_args[0][0]
-    # Mines the transcript's parent dir as convos, into wing "sessions".
+    # Mines the transcript's parent dir as convos. tmp_path is not a
+    # Claude Code project layout, so _sessions_wing_for_transcript falls
+    # back to "wing_sessions" (preserves legacy behaviour for unrecognized
+    # paths). Project-layout transcripts route to wing_<project>_sessions
+    # via the dedicated routing test.
     assert str(tmp_path) in cmd
     assert cmd[cmd.index("--mode") + 1] == "convos"
-    assert cmd[cmd.index("--wing") + 1] == "sessions"
+    assert cmd[cmd.index("--wing") + 1] == "wing_sessions"
 
 
 # --- run_hook ---

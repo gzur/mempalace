@@ -633,6 +633,7 @@ def _ingest_transcript(transcript_path: str):
     except Exception:
         return
 
+    wing = _sessions_wing_for_transcript(transcript_path)
     try:
         # Route through ``_spawn_mine`` so the per-target PID guard kicks
         # in here too — repeated Stop/PreCompact fires for the same
@@ -647,10 +648,10 @@ def _ingest_transcript(transcript_path: str):
                 "--mode",
                 "convos",
                 "--wing",
-                "sessions",
+                wing,
             ]
         )
-        _log(f"Transcript ingest started: {path.name}")
+        _log(f"Transcript ingest started: {path.name} -> {wing}")
     except OSError:
         pass
 
@@ -701,6 +702,23 @@ def _wing_from_transcript_path(transcript_path: str) -> str:
         project = match.group(1).lower().replace(" ", "_")
         return f"wing_{project}"
     return "wing_sessions"
+
+
+def _sessions_wing_for_transcript(transcript_path: str) -> str:
+    """Per-project session wing for full-transcript auto-ingest.
+
+    Reuses ``_wing_from_transcript_path`` so the project derivation rules
+    stay in one place. When that helper produces a real project wing
+    (e.g. ``wing_mempalace``) we append ``_sessions`` so curated drawers
+    and auto-archived transcripts live in different wings. For
+    unrecognized paths the helper already returns ``wing_sessions``;
+    keep that as the fallback so we don't end up writing to
+    ``wing__sessions``.
+    """
+    derived = _wing_from_transcript_path(transcript_path)
+    if derived == "wing_sessions":
+        return "wing_sessions"
+    return f"{derived}_sessions"
 
 
 def hook_stop(data: dict, harness: str):
