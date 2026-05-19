@@ -427,10 +427,144 @@ def render_kg_entity(name: str) -> str:
                 "</tr>"
             )
         parts.append("</tbody></table>")
+    parts.append(
+        f'<div class="meta"><a href="/ui/kg/graph?entity={_esc(name)}&hops=1">view neighborhood graph</a></div>'
+    )
     parts.append("<h2>timeline</h2>")
     tl = _d(mcp_server.tool_kg_timeline(entity=name)).get("timeline", []) or []
     parts.append(_kg_timeline_table(tl))
     return _layout(f"kg · {name}", "".join(parts))
+
+
+# ── kg neighborhood graph ─────────────────────────────────────────────────
+
+
+def _kg_collect_neighborhood(
+    entity: str, hops: int
+) -> tuple[set[str], set[tuple[str, str, str]], dict[str, int]]:
+    """Walk the KG up to ``hops`` hops from ``entity``. Returns
+    (nodes, edges, distance-from-focus map). Edges are (subject, predicate,
+    object). The distance map drives which ring each node lands on.
+    """
+    nodes: set[str] = {entity}
+    edges: set[tuple[str, str, str]] = set()
+    distance: dict[str, int] = {entity: 0}
+    frontier = [entity]
+    for d in range(hops):
+        next_frontier: list[str] = []
+        for e in frontier:
+            q = _d(mcp_server.tool_kg_query(entity=e, direction="both"))
+            if "error" in q:
+                continue
+            for f in q.get("facts") or []:
+                sub = (f.get("subject") or "").strip()
+                obj = (f.get("object") or "").strip()
+                pred = (f.get("predicate") or "").strip()
+                if not sub or not obj:
+                    continue
+                edges.add((sub, pred, obj))
+                for n in (sub, obj):
+                    if n not in nodes:
+                        nodes.add(n)
+                        distance[n] = d + 1
+                        next_frontier.append(n)
+        frontier = next_frontier
+        if not frontier:
+            break
+    return nodes, edges, distance
+
+
+def _kg_layout_polar(
+    nodes: set[str], distance: dict[str, int], hops: int
+) -> dict[str, tuple[float, float]]:
+    """Place focus at the center; group nodes by hop-distance onto concentric
+    rings. Deterministic ordering (alphabetical) within each ring so the
+    layout doesn't reshuffle between requests.
+    """
+    import math
+
+    cx, cy = 400.0, 250.0
+    radii = [0.0, 150.0, 230.0, 300.0]
+    positions: dict[str, tuple[float, float]] = {}
+    by_dist: dict[int, list[str]] = {}
+    for n in nodes:
+        d = min(distance.get(n, hops), len(radii) - 1)
+        by_dist.setdefault(d, []).append(n)
+    for d, members in by_dist.items():
+        members.sort()
+        r = radii[d]
+        if r == 0 or len(members) == 1:
+            positions[members[0]] = (cx, cy) if d == 0 else (cx + r, cy)
+            for i, m in enumerate(members[1:], start=1):
+                theta = (2 * math.pi * i) / len(members)
+                positions[m] = (cx + r * math.cos(theta), cy + r * math.sin(theta))
+            continue
+        for i, m in enumerate(members):
+            theta = (2 * math.pi * i) / len(members)
+            positions[m] = (cx + r * math.cos(theta), cy + r * math.sin(theta))
+    return positions
+
+
+def _render_kg_graph_svg(
+    focus: str,
+    nodes: set[str],
+    edges: set[tuple[str, str, str]],
+    positions: dict[str, tuple[float, float]],
+) -> str:
+    if not nodes:
+        return '<div class="meta">no graph to render</div>'
+    width, height = 800, 500
+    parts = [
+        f'<svg class="chart" viewBox="0 0 {width} {height}" '
+        'role="img" aria-label="kg neighborhood graph">'
+    ]
+    for sub, pred, obj in edges:
+        if sub not in positions or obj not in positions:
+            continue
+        x1, y1 = positions[sub]
+        x2, y2 = positions[obj]
+        parts.append(
+            f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" '
+            f'stroke="#30363d" stroke-width="1">'
+            f"<title>{_esc(sub)} — {_esc(pred)} → {_esc(obj)}</title></line>"
+        )
+    for name, (x, y) in positions.items():
+        is_focus = name == focus
+        r = 9 if is_focus else 5
+        fill = "#58a6ff" if is_focus else "#3fb950"
+        parts.append(
+            f'<a href="/ui/kg/entity?name={_esc(name)}">'
+            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{r}" fill="{fill}" '
+            f'stroke="#0d1117" stroke-width="1.5">'
+            f"<title>{_esc(name)}</title></circle>"
+            f'<text x="{x:.1f}" y="{(y + r + 12):.1f}" text-anchor="middle" '
+            f'fill="#c9d1d9" font-size="11">{_esc(name)}</text>'
+            "</a>"
+        )
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+def render_kg_graph(entity: str, hops: int = 1) -> str:
+    hops = max(1, min(int(hops), 2))
+    name = (entity or "").strip()
+    parts: list[str] = [
+        _crumb([("palace", "/ui/"), ("kg", "/ui/kg"), ("graph", None)]),
+        f"<h1>kg graph · {_esc(name) or 'entity'}</h1>",
+    ]
+    if not name:
+        parts.append('<div class="meta">no entity name supplied</div>')
+        return _layout("kg graph", "".join(parts))
+    nodes, edges, distance = _kg_collect_neighborhood(name, hops)
+    parts.append(
+        f'<div class="meta">{len(nodes)} entities · {len(edges)} relationships · '
+        f'<a href="/ui/kg/graph?entity={_esc(name)}&hops=1">1 hop</a> · '
+        f'<a href="/ui/kg/graph?entity={_esc(name)}&hops=2">2 hops</a> · '
+        f'<a href="/ui/kg/entity?name={_esc(name)}">facts table</a></div>'
+    )
+    positions = _kg_layout_polar(nodes, distance, hops)
+    parts.append(_render_kg_graph_svg(name, nodes, edges, positions))
+    return _layout(f"kg graph · {name}", "".join(parts))
 
 
 # ── health dashboard ──────────────────────────────────────────────────────

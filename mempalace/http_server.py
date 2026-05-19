@@ -156,6 +156,15 @@ async def ui_kg_entity(request: Request) -> Response:
     return await _render(lambda: web_ui.render_kg_entity(name))
 
 
+async def ui_kg_graph(request: Request) -> Response:
+    name = request.query_params.get("entity", "")
+    try:
+        hops = int(request.query_params.get("hops", "1") or "1")
+    except ValueError:
+        hops = 1
+    return await _render(lambda: web_ui.render_kg_graph(name, hops=hops))
+
+
 async def ui_health(_: Request) -> Response:
     return await _render(web_ui.render_health)
 
@@ -189,6 +198,7 @@ def build_app() -> Starlette:
             Route("/ui/recent", ui_recent, methods=["GET"]),
             Route("/ui/kg", ui_kg, methods=["GET"]),
             Route("/ui/kg/entity", ui_kg_entity, methods=["GET"]),
+            Route("/ui/kg/graph", ui_kg_graph, methods=["GET"]),
             Route("/ui/health", ui_health, methods=["GET"]),
             Route("/ui/operations", ui_operations, methods=["GET"]),
         ]

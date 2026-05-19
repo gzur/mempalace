@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+from unittest.mock import patch
 
 import pytest
 
@@ -210,3 +211,90 @@ def test_render_operations_meta_line(tmp_path, monkeypatch, days, bucket, expect
     assert expected_substr in html
     assert f"bucket={bucket}" in html
 
+
+# ── /ui/kg/graph ──────────────────────────────────────────────────────────
+
+
+def _kg_fact(subject: str, predicate: str, obj: str, direction: str = "outgoing") -> dict:
+    return {
+        "subject": subject,
+        "predicate": predicate,
+        "object": obj,
+        "direction": direction,
+        "valid_from": "2025-01-01",
+        "valid_to": "",
+    }
+
+
+def _kg_query_mock(facts_for: dict[str, list[dict]]):
+    """Factory: return a fake tool_kg_query that looks up by entity."""
+
+    def fake(entity: str, as_of=None, direction: str = "both"):
+        return {"entity": entity, "facts": facts_for.get(entity, []), "count": 0}
+
+    return fake
+
+
+def test_render_kg_graph_no_entity():
+    html = web_ui.render_kg_graph(entity="", hops=1)
+    assert "no entity name supplied" in html
+    assert "<svg" not in html
+
+
+def test_render_kg_graph_one_hop_renders_focus_and_neighbors():
+    facts_for = {
+        "Alice": [
+            _kg_fact("Alice", "employee_of", "Skyvafnir"),
+            _kg_fact("Alice", "knows", "Bob"),
+        ],
+        "Skyvafnir": [],
+        "Bob": [],
+    }
+    with patch.object(web_ui.mcp_server, "tool_kg_query", side_effect=_kg_query_mock(facts_for)):
+        html = web_ui.render_kg_graph(entity="Alice", hops=1)
+    assert '<svg class="chart"' in html
+    assert "<circle" in html and 'fill="#58a6ff"' in html and 'r="9"' in html
+    assert 'fill="#3fb950"' in html and 'r="5"' in html
+    for name in ("Alice", "Skyvafnir", "Bob"):
+        assert f">{name}</text>" in html
+    assert "employee_of" in html
+    assert "knows" in html
+    assert "3 entities" in html
+    assert "2 relationships" in html
+
+
+def test_render_kg_graph_hops_clamped_to_two():
+    """hops > 2 silently clamps to 2; negative or zero falls back to 1."""
+    facts_for = {"Alice": [_kg_fact("Alice", "knows", "Bob")], "Bob": []}
+    with patch.object(web_ui.mcp_server, "tool_kg_query", side_effect=_kg_query_mock(facts_for)):
+        html_high = web_ui.render_kg_graph(entity="Alice", hops=5)
+        html_low = web_ui.render_kg_graph(entity="Alice", hops=0)
+    for html in (html_high, html_low):
+        assert '<svg class="chart"' in html
+        assert ">Alice</text>" in html
+
+
+def test_render_kg_graph_two_hop_pulls_in_distance_two_nodes():
+    facts_for = {
+        "Alice": [_kg_fact("Alice", "knows", "Bob")],
+        "Bob": [_kg_fact("Bob", "knows", "Charlie")],
+        "Charlie": [],
+    }
+    with patch.object(web_ui.mcp_server, "tool_kg_query", side_effect=_kg_query_mock(facts_for)):
+        html_1 = web_ui.render_kg_graph(entity="Alice", hops=1)
+        html_2 = web_ui.render_kg_graph(entity="Alice", hops=2)
+    assert ">Charlie</text>" not in html_1
+    assert ">Charlie</text>" in html_2
+    assert "3 entities" in html_2
+
+
+def test_render_kg_graph_handles_kg_query_error():
+    """tool_kg_query returning {"error": ...} should not crash the page."""
+
+    def err(entity: str, as_of=None, direction: str = "both"):
+        return {"error": "bad entity"}
+
+    with patch.object(web_ui.mcp_server, "tool_kg_query", side_effect=err):
+        html = web_ui.render_kg_graph(entity="Alice", hops=1)
+    assert ">Alice</text>" in html
+    assert "1 entities" in html and "0 relationships" in html
