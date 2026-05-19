@@ -43,6 +43,70 @@ def test_render_operations_empty_wal(tmp_path, monkeypatch):
     assert "total" in html and "avg / day" in html
 
 
+def test_render_operations_chart_has_fixed_minimum_width(tmp_path, monkeypatch):
+    """Short ranges (1d, 7d) must not produce a tiny viewBox.
+
+    Before the fix the SVG width scaled with bar count
+    (``pad_l + bar_w * n + pad_r``) and ``preserveAspectRatio="none"`` let the
+    browser stretch x and y independently to fill ``width:100%``. With n=1 the
+    viewBox width was 68 user units, so a 1200px container stretched it 17x
+    and the single bar plus its y-axis label filled the entire viewport. The
+    fix pads the plot area out to a fixed minimum and drops the "none"
+    aspect-ratio override.
+    """
+    wal = tmp_path / "wal.jsonl"
+    now = _dt.datetime.now()
+    _write_wal(wal, [_op(now - _dt.timedelta(hours=1), "add_drawer", wing="x")])
+    monkeypatch.setattr(web_ui, "_WAL_PATH", wal)
+
+    html = web_ui.render_operations(days=1, bucket="day")
+    import re
+
+    m = re.search(r'viewBox="0 0 (\d+) (\d+)"', html)
+    assert m, "chart viewBox not found"
+    vb_w = int(m.group(1))
+    # plot_w_min (700) + pad_l (36) + pad_r (8) = 744
+    assert vb_w >= 744, f"viewBox width {vb_w} too small — short range would stretch"
+    # preserveAspectRatio="none" stretched text non-uniformly — must be gone.
+    assert 'preserveAspectRatio="none"' not in html
+
+
+def test_render_operations_chart_window_matches_total_count(tmp_path, monkeypatch):
+    """Total in summary must equal the sum of bars in the chart.
+
+    Before the fix, ``_load_wal_ops`` used a rolling ``now - days`` cutoff
+    while ``_fill_bucket_range`` rendered only ``days`` calendar buckets
+    ending today. For days=1 with bucket=day the loaded window touched
+    yesterday's date, but yesterday's bucket was not rendered — so a 24-hour
+    window's worth of ops counted in the total while only today's slice
+    appeared as bars.
+    """
+    wal = tmp_path / "wal.jsonl"
+    now = _dt.datetime.now()
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    # If we're early in the day this test has no headroom in the
+    # before-midnight slot — bail out cleanly rather than asserting a
+    # tautology.
+    if (now - midnight).total_seconds() < 60:
+        pytest.skip("too close to midnight to construct a meaningful yesterday slot")
+    yesterday_evening = midnight - _dt.timedelta(hours=4)
+    _write_wal(
+        wal,
+        [
+            # 15 ops yesterday evening — same calendar day as midnight - 4h
+            *(_op(yesterday_evening, "diary_write", agent_name="gzur") for _ in range(15)),
+            # 3 ops today
+            *(_op(now, "add_drawer", wing="x", room="y") for _ in range(3)),
+        ],
+    )
+    monkeypatch.setattr(web_ui, "_WAL_PATH", wal)
+
+    html = web_ui.render_operations(days=1, bucket="day")
+    # With cutoff aligned to midnight, days=1 should load exactly today's ops
+    # (3) — and the totals + chart agree.
+    assert "3 ops in last 1d" in html
+
+
 def test_render_operations_buckets_by_day(tmp_path, monkeypatch):
     wal = tmp_path / "wal.jsonl"
     now = _dt.datetime.now()
@@ -145,3 +209,4 @@ def test_render_operations_meta_line(tmp_path, monkeypatch, days, bucket, expect
     html = web_ui.render_operations(days=days, bucket=bucket)
     assert expected_substr in html
     assert f"bucket={bucket}" in html
+

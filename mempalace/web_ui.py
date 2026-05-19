@@ -502,8 +502,14 @@ _OPS_PALETTE = {
 }
 
 
-def _load_wal_ops(path: Path, since_days: int) -> list[dict]:
+def _load_wal_ops(path: Path, since_days: int, bucket: str = "day") -> list[dict]:
     """Stream the WAL, parse, filter to the last N days. Tolerant of malformed lines.
+
+    The cutoff is aligned to the bucket boundary so the loaded ops match
+    exactly the date range the chart will render: midnight for daily buckets,
+    top-of-hour for hourly buckets. Without alignment the total counts ops
+    from a partial leading bucket that the chart drops, producing the
+    "chart says 3, total says 18" mismatch on short ranges.
 
     Mirrors the malformed-line tolerance from ``mcp_server.tool_recent_ops``: a bad
     line is skipped, not raised, so a half-written final line during daemon crash
@@ -511,7 +517,15 @@ def _load_wal_ops(path: Path, since_days: int) -> list[dict]:
     """
     if not path.is_file():
         return []
-    cutoff = _dt.datetime.now() - _dt.timedelta(days=since_days)
+    now = _dt.datetime.now()
+    if bucket == "hour":
+        cutoff = (now - _dt.timedelta(hours=since_days * 24 - 1)).replace(
+            minute=0, second=0, microsecond=0
+        )
+    else:
+        cutoff = (now - _dt.timedelta(days=since_days - 1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
     out: list[dict] = []
     try:
         with open(path, encoding="utf-8") as f:
@@ -622,20 +636,30 @@ def _render_ops_chart_svg(
     totals = [sum(binned[k][t] for t in op_types) + binned[k].get("_other", 0) for k in keys]
     y_max = max(totals) if any(totals) else 1
 
-    # SVG layout
+    # SVG layout — keep the plot area at a fixed minimum width regardless of
+    # bar count, otherwise short ranges (1d, 7d) produce a tiny viewBox that
+    # the browser then stretches to fill the container, blowing up text and
+    # single bars to fullscreen size. preserveAspectRatio default keeps text
+    # at its declared font-size relative to the viewBox.
     pad_l, pad_r, pad_t, pad_b = 36, 8, 12, 28
     bar_w_max = 24
     bar_w = max(2, min(bar_w_max, (700 - pad_l - pad_r) // max(n, 1)))
-    inner_w = bar_w * n
-    width = pad_l + inner_w + pad_r
+    bar_gap = max(1, bar_w // 6)
+    plot_w_min = 700
+    cluster_w = bar_w * n
+    plot_w = max(plot_w_min, cluster_w)
+    width = pad_l + plot_w + pad_r
     height = 220
     plot_h = height - pad_t - pad_b
-    bar_gap = max(1, bar_w // 6)
+    # Centre the bar cluster within the plot area when it does not fill it
+    # (short ranges). For long ranges the cluster equals plot_w, so x_start
+    # collapses back to pad_l.
+    x_start = pad_l + (plot_w - cluster_w) // 2
 
     rects: list[str] = []
     overlays: list[str] = []
     for i, k in enumerate(keys):
-        x = pad_l + i * bar_w + bar_gap // 2
+        x = x_start + i * bar_w + bar_gap // 2
         col_w = bar_w - bar_gap
         running = 0
         col_total = 0
@@ -685,7 +709,7 @@ def _render_ops_chart_svg(
     # tick labels: first, middle, last; skip rest to avoid overlap
     tick_positions = sorted({0, n // 2, n - 1}) if n > 1 else [0]
     for ti in tick_positions:
-        cx = pad_l + ti * bar_w + bar_w / 2
+        cx = x_start + ti * bar_w + bar_w / 2
         text = keys[ti]
         if bucket == "hour":
             text = text[5:]  # "MM-DD HH:00"
@@ -695,7 +719,7 @@ def _render_ops_chart_svg(
 
     return (
         f'<svg class="chart" viewBox="0 0 {width} {height}" '
-        f'preserveAspectRatio="none" role="img" aria-label="operations over time">'
+        f'role="img" aria-label="operations over time">'
         + "".join(axes)
         + "".join(rects)
         + "".join(overlays)
@@ -804,7 +828,7 @@ def render_operations(days: int = 30, bucket: Optional[str] = None) -> str:
     if bucket not in ("hour", "day"):
         bucket = "hour" if days <= 2 else "day"
 
-    ops = _load_wal_ops(_WAL_PATH, since_days=days)
+    ops = _load_wal_ops(_WAL_PATH, since_days=days, bucket=bucket)
     raw_binned = _bucket_ops(ops, bucket)
     binned = _fill_bucket_range(raw_binned, bucket, days)
 
