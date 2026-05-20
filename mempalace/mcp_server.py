@@ -319,6 +319,34 @@ def _refresh_vector_disabled_flag() -> None:
         _vector_disabled_reason = ""
 
 
+def _refuse_write_if_diverged(op_name: str) -> Optional[dict]:
+    """Mirror the read-side BM25 fallback for write tools.
+
+    chromadb's Rust core segfaults on ``col.add``/``upsert``/``update``/
+    ``delete`` when HNSW max_elements is exceeded by sqlite's row count
+    (#1222). Reads already route to ``_bm25_only_via_sqlite``, but write
+    paths previously had no equivalent — each attempt crashed the daemon
+    and partially wrote an orphan sqlite row. Refuse here so callers get
+    a structured error instead of a dropped socket.
+    """
+    if not _vector_disabled:
+        return None
+    _wal_log(
+        f"{op_name}_refused",
+        {"reason": _vector_disabled_reason},
+        {"success": False, "vector_disabled": True},
+    )
+    return {
+        "success": False,
+        "error": (
+            "Write refused: vector index is in capacity-divergence state. "
+            f"{_vector_disabled_reason} Run `mempalace repair` to restore writes."
+        ),
+        "vector_disabled": True,
+        "vector_disabled_reason": _vector_disabled_reason,
+    }
+
+
 # ==================== WRITE-AHEAD LOG ====================
 # Every write operation is logged to a JSONL file before execution.
 # This provides an audit trail for detecting memory poisoning and
@@ -1039,6 +1067,10 @@ def tool_add_drawer(
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
+    refused = _refuse_write_if_diverged("add_drawer")
+    if refused is not None:
+        return refused
+
     col = _get_collection(create=True)
     if not col:
         return _no_palace()
@@ -1162,6 +1194,9 @@ def tool_recent_ops(limit: int = 10) -> dict:
 def tool_delete_drawer(drawer_id: str):
     """Delete a single drawer by ID."""
     global _metadata_cache
+    refused = _refuse_write_if_diverged("delete_drawer")
+    if refused is not None:
+        return refused
     col = _get_collection()
     if not col:
         return _no_palace()
@@ -1320,6 +1355,10 @@ def tool_update_drawer(drawer_id: str, content: str = None, wing: str = None, ro
 
     if content is None and wing is None and room is None:
         return {"success": True, "drawer_id": drawer_id, "noop": True}
+
+    refused = _refuse_write_if_diverged("update_drawer")
+    if refused is not None:
+        return refused
 
     col = _get_collection()
     if not col:
@@ -1533,6 +1572,10 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general", wing: 
         topic = sanitize_name(topic, "topic")
     except ValueError as e:
         return {"success": False, "error": str(e)}
+
+    refused = _refuse_write_if_diverged("diary_write")
+    if refused is not None:
+        return refused
 
     if wing:
         wing = sanitize_name(wing)

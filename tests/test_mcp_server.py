@@ -1774,9 +1774,9 @@ class TestCacheInvalidation:
         all_calls = captured["get"] + captured["create"]
         assert all_calls, "expected get_collection or create_collection to be called"
         for kwargs in all_calls:
-            assert (
-                "embedding_function" in kwargs
-            ), f"missing embedding_function= in chromadb call: {kwargs}"
+            assert "embedding_function" in kwargs, (
+                f"missing embedding_function= in chromadb call: {kwargs}"
+            )
             assert kwargs["embedding_function"] is not None
 
         # Same expectation on the create=False (cache-miss) reopen path.
@@ -2082,3 +2082,102 @@ class TestKGLazyCache:
         with pytest.raises(_sqlite3.ProgrammingError):
             mcp_server._call_kg(lambda kg: kg.query_entity("Alice"))
         assert calls["count"] == 2, "expected exactly one retry beyond the initial attempt"
+
+
+class TestVectorDisabledWriteGuard:
+    """When _vector_disabled is set, chromadb-writing tools must refuse.
+
+    chromadb's Rust core segfaults on col.add/upsert/update/delete when
+    HNSW max_elements is exceeded by sqlite's row count (#1222). Reads
+    already route to BM25-only sqlite. These tests pin the mirror guard
+    for writes — they must short-circuit before _get_collection is even
+    called, so chromadb is never touched and no orphan sqlite row leaks.
+    """
+
+    def _patch_disabled(self, monkeypatch):
+        from mempalace import mcp_server
+
+        monkeypatch.setattr(mcp_server, "_vector_disabled", True, raising=False)
+        monkeypatch.setattr(
+            mcp_server,
+            "_vector_disabled_reason",
+            "HNSW gap (test)",
+            raising=False,
+        )
+
+        def fail_get_collection(*_a, **_kw):
+            raise AssertionError("_get_collection must not run when vector_disabled is set")
+
+        monkeypatch.setattr(mcp_server, "_get_collection", fail_get_collection)
+        return mcp_server
+
+    def test_add_drawer_refuses(self, monkeypatch):
+        mcp_server = self._patch_disabled(monkeypatch)
+        result = mcp_server.tool_add_drawer(wing="self", room="test", content="x" * 100)
+        assert result["success"] is False
+        assert result["vector_disabled"] is True
+        assert result["vector_disabled_reason"] == "HNSW gap (test)"
+        assert "repair" in result["error"].lower()
+
+    def test_diary_write_refuses(self, monkeypatch):
+        mcp_server = self._patch_disabled(monkeypatch)
+        result = mcp_server.tool_diary_write(agent_name="gzur", entry="test entry", topic="status")
+        assert result["success"] is False
+        assert result["vector_disabled"] is True
+        assert "repair" in result["error"].lower()
+
+    def test_update_drawer_refuses(self, monkeypatch):
+        mcp_server = self._patch_disabled(monkeypatch)
+        result = mcp_server.tool_update_drawer(
+            drawer_id="drawer_foo_bar_aaa", content="new content"
+        )
+        assert result["success"] is False
+        assert result["vector_disabled"] is True
+
+    def test_update_drawer_noop_does_not_check_guard(self, monkeypatch):
+        """No-op updates short-circuit even before the guard — they never touch chromadb."""
+        mcp_server = self._patch_disabled(monkeypatch)
+        result = mcp_server.tool_update_drawer(drawer_id="drawer_foo_bar_aaa")
+        assert result == {"success": True, "drawer_id": "drawer_foo_bar_aaa", "noop": True}
+
+    def test_delete_drawer_refuses(self, monkeypatch):
+        mcp_server = self._patch_disabled(monkeypatch)
+        result = mcp_server.tool_delete_drawer(drawer_id="drawer_foo_bar_aaa")
+        assert result["success"] is False
+        assert result["vector_disabled"] is True
+
+    def test_guard_writes_wal_entry(self, monkeypatch, tmp_path):
+        """Refused writes are recorded in the WAL so the audit trail
+        captures the rejection (not just the would-be write)."""
+        from mempalace import mcp_server
+
+        wal_file = tmp_path / "write_log.jsonl"
+        monkeypatch.setattr(mcp_server, "_WAL_FILE", wal_file)
+        self._patch_disabled(monkeypatch)
+
+        mcp_server.tool_diary_write(agent_name="gzur", entry="test", topic="status")
+
+        assert wal_file.exists()
+        body = wal_file.read_text(encoding="utf-8")
+        assert "diary_write_refused" in body
+        assert "HNSW gap (test)" in body
+
+    def test_guard_allows_when_not_diverged(self, monkeypatch):
+        """Sanity: when _vector_disabled is False the guard returns None
+        and the tool proceeds as normal (here, fails to get_collection
+        instead of short-circuiting)."""
+        from mempalace import mcp_server
+
+        monkeypatch.setattr(mcp_server, "_vector_disabled", False, raising=False)
+        monkeypatch.setattr(mcp_server, "_vector_disabled_reason", "", raising=False)
+        sentinel = {"reached_chromadb": True}
+
+        def stub_get_collection(*_a, **_kw):
+            return None  # triggers _no_palace path inside tool_add_drawer
+
+        monkeypatch.setattr(mcp_server, "_get_collection", stub_get_collection)
+        result = mcp_server.tool_add_drawer(wing="self", room="test", content="x" * 100)
+        # _no_palace returns success=False with a different shape — the
+        # signal we want is that we DID reach _get_collection, not the
+        # guard.
+        assert "vector_disabled" not in result, sentinel
