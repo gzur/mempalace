@@ -123,7 +123,9 @@ def _ops_table(ops: Iterable[dict]) -> str:
     for op in reversed(ops_list):  # newest first
         ts = op.get("ts") or op.get("timestamp") or op.get("filed_at") or ""
         kind = op.get("op") or op.get("operation") or op.get("kind") or ""
-        data = op.get("data") if isinstance(op.get("data"), dict) else op
+        data = op.get("params") if isinstance(op.get("params"), dict) else None
+        if data is None:
+            data = op.get("data") if isinstance(op.get("data"), dict) else op
         bits: list[str] = []
         for k in (
             "drawer_id",
