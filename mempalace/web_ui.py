@@ -127,8 +127,12 @@ def _ops_table(ops: Iterable[dict]) -> str:
         if data is None:
             data = op.get("data") if isinstance(op.get("data"), dict) else op
         bits: list[str] = []
+        target_id = ""
+        if isinstance(data, dict):
+            target_id = data.get("drawer_id") or data.get("entry_id") or ""
         for k in (
             "drawer_id",
+            "entry_id",
             "wing",
             "room",
             "agent_name",
@@ -144,8 +148,11 @@ def _ops_table(ops: Iterable[dict]) -> str:
             v = data.get(k) if isinstance(data, dict) else None
             if v:
                 bits.append(f'<span class="pill">{_esc(k)}={_esc(v)}</span>')
+        ts_cell = (
+            f'<a href="/ui/drawer/{_esc(target_id)}">{_esc(ts)}</a>' if target_id else _esc(ts)
+        )
         rows.append(
-            f'<tr><td class="small">{_esc(ts)}</td><td>{_esc(kind)}</td><td>{"".join(bits)}</td></tr>'
+            f'<tr><td class="small">{ts_cell}</td><td>{_esc(kind)}</td><td>{"".join(bits)}</td></tr>'
         )
     rows.append("</tbody></table>")
     return "".join(rows)
