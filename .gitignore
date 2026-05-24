@@ -42,3 +42,6 @@ venv/
 mempalace/web/node_modules/
 mempalace/web/dist/
 mempalace/web/.vite/
+mempalace/web/.tanstack/
+mempalace/web/tsconfig.tsbuildinfo
+mempalace/web/src/routeTree.gen.ts

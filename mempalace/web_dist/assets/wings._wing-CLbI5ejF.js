@@ -1,0 +1,1 @@
+import{R as n,j as o}from"./index-Ce8bVkNe.js";import{S as i}from"./Stub-COMDf56H.js";function r(){const{wing:t}=n.useParams();return o.jsx(i,{title:`wing · ${t}`,legacy:`/ui/wing/${t}`})}export{r as component};
