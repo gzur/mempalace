@@ -252,9 +252,12 @@ def check_seq_id_gap(palace_path: str) -> Check:
             rows = {
                 sid: row[0]
                 for sid, row in (
-                    (sid, conn.execute(
-                        "SELECT seq_id FROM max_seq_id WHERE segment_id = ?", (sid,)
-                    ).fetchone())
+                    (
+                        sid,
+                        conn.execute(
+                            "SELECT seq_id FROM max_seq_id WHERE segment_id = ?", (sid,)
+                        ).fetchone(),
+                    )
                     for sid in (segs["metadata"], segs["vector"])
                 )
                 if row is not None
@@ -349,7 +352,9 @@ def check_wal() -> Check:
 # ── runner ────────────────────────────────────────────────────────────────
 
 
-def run_checks(palace_path: Optional[str] = None, daemon_port: int = DAEMON_PORT_DEFAULT) -> list[Check]:
+def run_checks(
+    palace_path: Optional[str] = None, daemon_port: int = DAEMON_PORT_DEFAULT
+) -> list[Check]:
     """Run every check in the canonical order. Order is stable so monitors
     can diff status across runs without re-sorting."""
     resolved = palace_path or MempalaceConfig().palace_path or ""

@@ -738,9 +738,7 @@ def cmd_doctor(args) -> int:
     import sys
     from .health import FAIL, OK, WARN, overall_status, run_checks
 
-    palace_path = (
-        os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
-    )
+    palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
     port = getattr(args, "port", 9876)
 
     if sys.stdout.isatty():

@@ -181,9 +181,7 @@ def get_drawer(drawer_id: str) -> Optional[dict]:
         if not seg:
             return None
         row = conn.execute(
-            "SELECT id FROM embeddings "
-            "WHERE segment_id = ? AND embedding_id = ? "
-            "LIMIT 1",
+            "SELECT id FROM embeddings WHERE segment_id = ? AND embedding_id = ? LIMIT 1",
             (seg, drawer_id),
         ).fetchone()
         if not row:
