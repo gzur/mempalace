@@ -1,1 +1,0 @@
-import{a as e,j as t}from"./index-Ce8bVkNe.js";import{S as a}from"./Stub-COMDf56H.js";function i(){const{id:r}=e.useParams();return t.jsx(a,{title:`drawer · ${r.slice(0,32)}…`,legacy:`/ui/drawer/${r}`})}export{i as component};
