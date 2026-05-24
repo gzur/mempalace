@@ -16,14 +16,16 @@ import asyncio
 import concurrent.futures
 import contextvars
 import logging
-from typing import Callable, Optional
+from pathlib import Path
+from typing import Any, Callable, Optional
 
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
-from starlette.routing import Route
+from starlette.routing import Mount, Route
+from starlette.staticfiles import StaticFiles
 
-from . import mcp_server, web_ui
+from . import http_api, mcp_server, web_ui
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +98,27 @@ async def _render(fn: Callable[[], str]) -> Response:
         logger.exception("ui render failed")
         return HTMLResponse(
             "<h1>render error</h1><p>see ~/.mempalace/logs/daemon.log</p>",
+            status_code=500,
+        )
+
+
+async def render_json(fn: Callable[[], Any]) -> Response:
+    """JSON sibling of ``_render``: same lock + executor, dict-out.
+
+    Exposed (no leading underscore) so ``http_api`` can use it without
+    triggering a circular module-private import.
+    """
+    ctx = contextvars.copy_context()
+    try:
+        async with _dispatch_lock:
+            body = await asyncio.get_running_loop().run_in_executor(_TOOL_EXECUTOR, ctx.run, fn)
+        if isinstance(body, Response):
+            return body
+        return JSONResponse(http_api._json_safe(body))
+    except Exception:
+        logger.exception("api render failed")
+        return JSONResponse(
+            {"error": "internal", "detail": "see ~/.mempalace/logs/daemon.log"},
             status_code=500,
         )
 
@@ -184,22 +207,65 @@ async def root(_: Request) -> Response:
     return RedirectResponse("/ui/", status_code=307)
 
 
+def _web_dist_dir() -> Path:
+    """Location of the built SPA assets shipped inside the wheel."""
+    return Path(__file__).parent / "web_dist"
+
+
+class _SPAStaticFiles(StaticFiles):
+    """``StaticFiles`` that falls back to ``index.html`` on 404.
+
+    Required so a deep link like ``/app/kg/graph`` — which has no
+    corresponding file on disk because the client router owns it — resolves
+    to the SPA shell instead of returning 404. Without this, refreshing the
+    browser on any non-root route gives a broken page.
+
+    Starlette's StaticFiles raises ``HTTPException(404)`` when a path is
+    not found, rather than returning a Response — catch that, not a 404
+    Response.
+    """
+
+    async def get_response(self, path: str, scope):
+        from starlette.exceptions import HTTPException
+
+        try:
+            response = await super().get_response(path, scope)
+        except HTTPException as e:
+            if e.status_code != 404:
+                raise
+            return await super().get_response("index.html", scope)
+        if response.status_code == 404:
+            return await super().get_response("index.html", scope)
+        return response
+
+
 def build_app() -> Starlette:
-    return Starlette(
-        routes=[
-            Route("/", root, methods=["GET"]),
-            Route("/mcp", mcp_endpoint, methods=["POST"]),
-            Route("/healthz", healthz, methods=["GET"]),
-            Route("/ui/", ui_index, methods=["GET"]),
-            Route("/ui/wing/{wing}", ui_wing, methods=["GET"]),
-            Route("/ui/wing/{wing}/{room}", ui_room, methods=["GET"]),
-            Route("/ui/drawer/{drawer_id:path}", ui_drawer, methods=["GET"]),
-            Route("/ui/search", ui_search, methods=["GET"]),
-            Route("/ui/recent", ui_recent, methods=["GET"]),
-            Route("/ui/kg", ui_kg, methods=["GET"]),
-            Route("/ui/kg/entity", ui_kg_entity, methods=["GET"]),
-            Route("/ui/kg/graph", ui_kg_graph, methods=["GET"]),
-            Route("/ui/health", ui_health, methods=["GET"]),
-            Route("/ui/operations", ui_operations, methods=["GET"]),
-        ]
-    )
+    routes: list = [
+        Route("/", root, methods=["GET"]),
+        Route("/mcp", mcp_endpoint, methods=["POST"]),
+        Route("/healthz", healthz, methods=["GET"]),
+        Route("/ui/", ui_index, methods=["GET"]),
+        Route("/ui/wing/{wing}", ui_wing, methods=["GET"]),
+        Route("/ui/wing/{wing}/{room}", ui_room, methods=["GET"]),
+        Route("/ui/drawer/{drawer_id:path}", ui_drawer, methods=["GET"]),
+        Route("/ui/search", ui_search, methods=["GET"]),
+        Route("/ui/recent", ui_recent, methods=["GET"]),
+        Route("/ui/kg", ui_kg, methods=["GET"]),
+        Route("/ui/kg/entity", ui_kg_entity, methods=["GET"]),
+        Route("/ui/kg/graph", ui_kg_graph, methods=["GET"]),
+        Route("/ui/health", ui_health, methods=["GET"]),
+        Route("/ui/operations", ui_operations, methods=["GET"]),
+    ]
+    routes.extend(http_api.routes())
+    web_dist = _web_dist_dir()
+    if web_dist.is_dir():
+        # ``html=True`` falls back to index.html for unknown sub-paths so
+        # the client-side router owns /app/<anything>.
+        routes.append(
+            Mount(
+                "/app",
+                app=_SPAStaticFiles(directory=str(web_dist), html=True),
+                name="spa",
+            )
+        )
+    return Starlette(routes=routes)

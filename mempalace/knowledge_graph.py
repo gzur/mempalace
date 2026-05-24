@@ -499,6 +499,85 @@ class KnowledgeGraph:
             for r in rows
         ]
 
+    # ── Whole-graph dump (for force-directed UI) ──────────────────────────
+
+    def graph_dump(
+        self,
+        include_expired: bool = False,
+        max_nodes: Optional[int] = None,
+        as_of: Optional[str] = None,
+    ):
+        """One-shot dump of the whole graph for client-side visualization.
+
+        Returns ``{nodes: [{id, name, type, degree}], edges: [{s, p, o,
+        valid_from, valid_to, current}], truncated: bool}``. When ``max_nodes``
+        is set and the graph has more nodes than that, returns only the
+        top-degree subset and sets ``truncated=True``.
+
+        ``include_expired`` and ``as_of`` follow the same conventions as
+        ``query_entity``; the default ``include_expired=False`` returns only
+        currently-valid facts (``valid_to IS NULL``).
+        """
+        clauses: list[str] = []
+        params: list = []
+        if not include_expired:
+            clauses.append("(t.valid_to IS NULL)")
+        if as_of is not None:
+            extra, args = _temporal_filter_sql(as_of)
+            clauses.append(extra)
+            params.extend(args)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        with self._lock:
+            conn = self._conn()
+            triple_rows = conn.execute(
+                f"""
+                SELECT t.subject, t.predicate, t.object, t.valid_from, t.valid_to,
+                       s.name AS sub_name, s.type AS sub_type,
+                       o.name AS obj_name, o.type AS obj_type
+                FROM triples t
+                JOIN entities s ON t.subject = s.id
+                JOIN entities o ON t.object = o.id
+                {where}
+                """,
+                params,
+            ).fetchall()
+
+        degree: dict[str, int] = {}
+        node_meta: dict[str, dict] = {}
+        edges: list[dict] = []
+        for r in triple_rows:
+            s_id = r["subject"]
+            o_id = r["object"]
+            degree[s_id] = degree.get(s_id, 0) + 1
+            degree[o_id] = degree.get(o_id, 0) + 1
+            node_meta.setdefault(
+                s_id, {"id": s_id, "name": r["sub_name"], "type": r["sub_type"] or "unknown"}
+            )
+            node_meta.setdefault(
+                o_id, {"id": o_id, "name": r["obj_name"], "type": r["obj_type"] or "unknown"}
+            )
+            edges.append(
+                {
+                    "s": s_id,
+                    "p": r["predicate"],
+                    "o": o_id,
+                    "valid_from": r["valid_from"],
+                    "valid_to": r["valid_to"],
+                    "current": r["valid_to"] is None,
+                }
+            )
+
+        truncated = False
+        if max_nodes is not None and len(node_meta) > max_nodes:
+            kept = {nid for nid, _ in sorted(degree.items(), key=lambda kv: -kv[1])[:max_nodes]}
+            node_meta = {nid: meta for nid, meta in node_meta.items() if nid in kept}
+            edges = [e for e in edges if e["s"] in kept and e["o"] in kept]
+            truncated = True
+
+        nodes = [{**meta, "degree": degree.get(meta["id"], 0)} for meta in node_meta.values()]
+        nodes.sort(key=lambda n: (-n["degree"], n["name"]))
+        return {"nodes": nodes, "edges": edges, "truncated": truncated}
+
     # ── Stats ─────────────────────────────────────────────────────────────
 
     def stats(self):

@@ -37,3 +37,8 @@ venv/
 # ChromaDB local data
 *.sqlite3-journal
 .envrc
+
+# Frontend (Phase 2+ adds source tree; only the built bundle is committed)
+mempalace/web/node_modules/
+mempalace/web/dist/
+mempalace/web/.vite/

@@ -12,14 +12,11 @@ directly in read-only mode; only the KG views and WAL read still go through
 
 from __future__ import annotations
 
-import datetime as _dt
 import html
-import json
 from collections import OrderedDict, defaultdict
-from pathlib import Path
 from typing import Any, Iterable, Optional
 
-from . import mcp_server, palace_sql
+from . import mcp_server, palace_sql, wal_series
 
 
 _CSS = """
@@ -629,120 +626,16 @@ def render_health() -> str:
 
 # ── /ui/operations ────────────────────────────────────────────────────────
 #
-# Time-series chart of WAL operations. WAL is ``~/.mempalace/wal/write_log.jsonl``,
-# the same file ``mcp_server.tool_recent_ops`` reads at :1140.
+# Time-series chart of WAL operations. The pure load/bucket/fill helpers
+# live in ``mempalace.wal_series`` so the JSON API at /api/v1/ops/series
+# and this server-rendered chart share one implementation.
 
-_WAL_PATH = Path("~/.mempalace/wal/write_log.jsonl").expanduser()
-
-_OP_TYPES = ("add_drawer", "diary_write", "update_drawer", "kg_add", "delete_drawer")
-
-_OPS_PALETTE = {
-    "add_drawer": "#58a6ff",
-    "diary_write": "#3fb950",
-    "update_drawer": "#d29922",
-    "kg_add": "#bc8cff",
-    "delete_drawer": "#f85149",
-}
-
-
-def _load_wal_ops(path: Path, since_days: int, bucket: str = "day") -> list[dict]:
-    """Stream the WAL, parse, filter to the last N days. Tolerant of malformed lines.
-
-    The cutoff is aligned to the bucket boundary so the loaded ops match
-    exactly the date range the chart will render: midnight for daily buckets,
-    top-of-hour for hourly buckets. Without alignment the total counts ops
-    from a partial leading bucket that the chart drops, producing the
-    "chart says 3, total says 18" mismatch on short ranges.
-
-    Mirrors the malformed-line tolerance from ``mcp_server.tool_recent_ops``: a bad
-    line is skipped, not raised, so a half-written final line during daemon crash
-    doesn't take down the chart.
-    """
-    if not path.is_file():
-        return []
-    now = _dt.datetime.now()
-    if bucket == "hour":
-        cutoff = (now - _dt.timedelta(hours=since_days * 24 - 1)).replace(
-            minute=0, second=0, microsecond=0
-        )
-    else:
-        cutoff = (now - _dt.timedelta(days=since_days - 1)).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
-    out: list[dict] = []
-    try:
-        with open(path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                ts = rec.get("timestamp") or ""
-                try:
-                    dt = _dt.datetime.fromisoformat(ts)
-                except (TypeError, ValueError):
-                    continue
-                if dt < cutoff:
-                    continue
-                rec["_dt"] = dt
-                out.append(rec)
-    except OSError:
-        return []
-    out.sort(key=lambda r: r["_dt"])
-    return out
-
-
-def _bucket_key(dt: _dt.datetime, bucket: str) -> str:
-    if bucket == "hour":
-        return dt.strftime("%Y-%m-%d %H:00")
-    return dt.strftime("%Y-%m-%d")
-
-
-def _bucket_ops(ops: list[dict], bucket: str) -> "OrderedDict[str, dict[str, int]]":
-    """Group ops by (time-bucket, op_type). Returns ordered dict (oldest first)."""
-    out: "OrderedDict[str, dict[str, int]]" = OrderedDict()
-    for op in ops:
-        key = _bucket_key(op["_dt"], bucket)
-        if key not in out:
-            out[key] = {t: 0 for t in _OP_TYPES}
-            out[key]["_other"] = 0
-        kind = op.get("operation") or "_other"
-        if kind in out[key]:
-            out[key][kind] += 1
-        else:
-            out[key]["_other"] += 1
-    return out
-
-
-def _fill_bucket_range(
-    binned: "OrderedDict[str, dict[str, int]]",
-    bucket: str,
-    days: int,
-) -> "OrderedDict[str, dict[str, int]]":
-    """Insert empty buckets so the x-axis has the full requested range, not just
-    the buckets with data. Hourly: last ``days * 24`` hours. Daily: last ``days``
-    days. The result is a NEW ordered dict; the input is not mutated.
-    """
-    empty = {t: 0 for t in _OP_TYPES}
-    empty["_other"] = 0
-    out: "OrderedDict[str, dict[str, int]]" = OrderedDict()
-    now = _dt.datetime.now()
-    if bucket == "hour":
-        steps = days * 24
-        for i in range(steps - 1, -1, -1):
-            t = now - _dt.timedelta(hours=i)
-            t = t.replace(minute=0, second=0, microsecond=0)
-            key = _bucket_key(t, bucket)
-            out[key] = dict(binned.get(key, empty))
-    else:
-        for i in range(days - 1, -1, -1):
-            t = now - _dt.timedelta(days=i)
-            key = _bucket_key(t, bucket)
-            out[key] = dict(binned.get(key, empty))
-    return out
+_WAL_PATH = wal_series.DEFAULT_WAL_PATH
+_OP_TYPES = wal_series.OP_TYPES
+_OPS_PALETTE = wal_series.OPS_PALETTE
+_load_wal_ops = wal_series.load_wal_ops
+_bucket_ops = wal_series.bucket_ops
+_fill_bucket_range = wal_series.fill_bucket_range
 
 
 def _render_range_form(days: int, bucket: str) -> str:
