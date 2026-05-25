@@ -177,6 +177,58 @@ class TestHealthEndpoint:
             assert {"name", "status", "detail"} <= set(c.keys())
 
 
+def _mcp_call(client, name, args, *, headers=None, call_id=1):
+    """POST a tools/call and unwrap the text-encoded JSON result."""
+    r = client.post(
+        "/mcp",
+        headers=headers or {},
+        json={
+            "jsonrpc": "2.0",
+            "id": call_id,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": args},
+        },
+    )
+    assert r.status_code == 200, r.text
+    text = r.json()["result"]["content"][0]["text"]
+    return json.loads(text)
+
+
+class TestClientHeader:
+    def test_x_mempalace_client_lands_on_drawer_metadata(self, app_client):
+        body = _mcp_call(
+            app_client,
+            "mempalace_add_drawer",
+            {
+                "wing": "self",
+                "room": "tests",
+                "content": "drawer with client header attribution",
+            },
+            headers={"X-Mempalace-Client": "claude-code/mempalace"},
+        )
+        assert body["success"] is True
+        drawer_id = body["drawer_id"]
+
+        detail = app_client.get(f"/api/v1/drawers/{drawer_id}").json()
+        assert detail["metadata"].get("client") == "claude-code/mempalace"
+
+    def test_no_header_omits_client_field(self, app_client):
+        body = _mcp_call(
+            app_client,
+            "mempalace_add_drawer",
+            {
+                "wing": "self",
+                "room": "tests",
+                "content": "drawer without client header",
+            },
+            call_id=2,
+        )
+        assert body["success"] is True
+        drawer_id = body["drawer_id"]
+        detail = app_client.get(f"/api/v1/drawers/{drawer_id}").json()
+        assert "client" not in detail["metadata"]
+
+
 class TestStaticFilesMount:
     def test_app_root_returns_index_html(self, app_client):
         r = app_client.get("/app/")

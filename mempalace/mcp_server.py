@@ -145,6 +145,22 @@ def _default_added_by() -> str:
     return f"mcp-{sid}"
 
 
+def _current_client() -> Optional[str]:
+    """Read the ``X-Mempalace-Client`` header for the in-flight HTTP request.
+
+    Returns ``None`` for stdio callers or HTTP requests with no header. The
+    value is free-form (typically ``claude-code/<project>``); we don't try
+    to parse or validate it beyond rejecting empty strings.
+    """
+    try:
+        from .http_server import current_client
+
+        v = current_client()
+    except (ImportError, LookupError):
+        return None
+    return v or None
+
+
 def _setup_logging(transport: str) -> None:
     """Add rotating JSON file handler when running as a long-lived HTTP daemon."""
     if transport != "http":
@@ -1054,12 +1070,26 @@ def tool_follow_tunnels(wing: str, room: str):
 
 
 def tool_add_drawer(
-    wing: str, room: str, content: str, source_file: str = None, added_by: str = None
+    wing: str,
+    room: str,
+    content: str,
+    source_file: str = None,
+    added_by: str = None,
+    client: str = None,
 ):
-    """File verbatim content into a wing/room. Checks for duplicates first."""
+    """File verbatim content into a wing/room. Checks for duplicates first.
+
+    ``client`` is a free-form attribution string (e.g. ``claude-code/mempalace``)
+    indicating which agent + project produced the write. When the caller does
+    not pass one, we pick up the ``X-Mempalace-Client`` HTTP header if the
+    request came in over the daemon. Stored as a metadata field on the drawer
+    so the SPA can show "who wrote this".
+    """
     global _metadata_cache
     if added_by is None:
         added_by = _default_added_by()
+    if client is None:
+        client = _current_client()
     try:
         wing = sanitize_name(wing, "wing")
         room = sanitize_name(room, "room")
@@ -1090,6 +1120,7 @@ def tool_add_drawer(
                     "wing": wing,
                     "room": room,
                     "added_by": added_by,
+                    "client": client or "",
                     "content_length": len(content),
                     "content_preview": content[:200],
                 },
@@ -1100,19 +1131,22 @@ def tool_add_drawer(
         logger.debug("Idempotency pre-check failed for %s", drawer_id, exc_info=True)
 
     try:
+        metadata = {
+            "wing": wing,
+            "room": room,
+            "source_file": source_file or "",
+            "chunk_index": 0,
+            "added_by": added_by,
+            "filed_at": datetime.now().isoformat(),
+        }
+        # Only persist ``client`` when we actually have a value — keeps the
+        # metadata table tidy for older drawers that pre-date this field.
+        if client:
+            metadata["client"] = client
         col.upsert(
             ids=[drawer_id],
             documents=[content],
-            metadatas=[
-                {
-                    "wing": wing,
-                    "room": room,
-                    "source_file": source_file or "",
-                    "chunk_index": 0,
-                    "added_by": added_by,
-                    "filed_at": datetime.now().isoformat(),
-                }
-            ],
+            metadatas=[metadata],
         )
         inserted = col.get(ids=[drawer_id], include=[])
         if not inserted.ids:
@@ -1146,6 +1180,7 @@ def tool_add_drawer(
                 "wing": wing,
                 "room": room,
                 "added_by": added_by,
+                "client": client or "",
                 "content_length": len(content),
                 "content_preview": content[:200],
             },
@@ -1161,6 +1196,7 @@ def tool_add_drawer(
                 "wing": wing,
                 "room": room,
                 "added_by": added_by,
+                "client": client or "",
                 "content_length": len(content),
                 "content_preview": content[:200],
             },
@@ -1598,6 +1634,7 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general", wing: 
         f"diary_{wing}_{now.strftime('%Y%m%d_%H%M%S%f')}_"
         f"{hashlib.sha256(entry.encode()).hexdigest()[:12]}"
     )
+    client = _current_client()
 
     _wal_log(
         "diary_write",
@@ -1605,6 +1642,7 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general", wing: 
             "agent_name": agent_name,
             "topic": topic,
             "entry_id": entry_id,
+            "client": client or "",
             "entry_preview": entry[:200],
         },
     )
@@ -1614,22 +1652,23 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general", wing: 
         # semantic search quality. For now, store raw AAAK in metadata so it's
         # preserved, and keep the document as-is for embedding (even though
         # compressed AAAK degrades embedding quality).
+        metadata = {
+            "wing": wing,
+            "room": room,
+            "hall": "hall_diary",
+            "topic": topic,
+            "type": "diary_entry",
+            "agent": agent_name,
+            "added_by": _default_added_by(),
+            "filed_at": now.isoformat(),
+            "date": now.strftime("%Y-%m-%d"),
+        }
+        if client:
+            metadata["client"] = client
         col.add(
             ids=[entry_id],
             documents=[entry],
-            metadatas=[
-                {
-                    "wing": wing,
-                    "room": room,
-                    "hall": "hall_diary",
-                    "topic": topic,
-                    "type": "diary_entry",
-                    "agent": agent_name,
-                    "added_by": _default_added_by(),
-                    "filed_at": now.isoformat(),
-                    "date": now.strftime("%Y-%m-%d"),
-                }
-            ],
+            metadatas=[metadata],
         )
         logger.info(f"Diary entry: {entry_id} → {wing}/diary/{topic}")
         return {

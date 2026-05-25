@@ -33,6 +33,13 @@ _dispatch_lock = asyncio.Lock()
 _session_id_var: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
     "session_id", default=None
 )
+# Per-request free-form client identifier carried by the X-Mempalace-Client
+# header. Clients set this once per project (e.g. ``claude-code/mempalace``)
+# so every write can be attributed to the specific agent + project that
+# triggered it. See ``mcp_server.current_client`` for the read side.
+_client_var: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "mempalace_client", default=None
+)
 
 # Pin every tool call to ONE OS thread. ChromaDB's HNSW C++ bindings are not
 # thread-safe; calling ``col.count()`` / ``col.get()`` from a thread other
@@ -49,6 +56,13 @@ def current_session_id() -> str:
     return _session_id_var.get() or "anonymous"
 
 
+def current_client() -> Optional[str]:
+    """Return the ``X-Mempalace-Client`` header value for the in-flight
+    request, or ``None`` if absent (stdio caller, missing header).
+    """
+    return _client_var.get()
+
+
 async def mcp_endpoint(request: Request) -> Response:
     try:
         body = await request.json()
@@ -59,7 +73,9 @@ async def mcp_endpoint(request: Request) -> Response:
         )
 
     session_id = request.headers.get("X-Session-Id") or "anonymous"
-    token = _session_id_var.set(session_id)
+    client = request.headers.get("X-Mempalace-Client") or None
+    sid_token = _session_id_var.set(session_id)
+    client_token = _client_var.set(client)
     try:
         # asyncio's ThreadPoolExecutor does not auto-propagate contextvars;
         # capture the context after setting the var so the executor thread
@@ -70,7 +86,8 @@ async def mcp_endpoint(request: Request) -> Response:
                 _TOOL_EXECUTOR, ctx.run, mcp_server.handle_request, body
             )
     finally:
-        _session_id_var.reset(token)
+        _session_id_var.reset(sid_token)
+        _client_var.reset(client_token)
 
     if response is None:
         return Response(status_code=204)
