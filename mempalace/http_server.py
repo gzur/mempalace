@@ -21,11 +21,11 @@ from typing import Any, Callable, Optional
 
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from starlette.responses import JSONResponse, RedirectResponse, Response
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from . import http_api, mcp_server, web_ui
+from . import http_api, mcp_server
 
 logger = logging.getLogger(__name__)
 
@@ -81,27 +81,6 @@ async def healthz(_: Request) -> Response:
     return JSONResponse({"ok": True, "version": mcp_server.__version__})
 
 
-# ── read-only HTML pane of glass ──────────────────────────────────────────
-#
-# Routes funnel through the same ``_dispatch_lock`` as ``/mcp`` so the
-# module-level caches in ``mcp_server`` stay single-threaded. The rendering
-# functions in ``web_ui`` call read-only tool functions only.
-
-
-async def _render(fn: Callable[[], str]) -> Response:
-    ctx = contextvars.copy_context()
-    try:
-        async with _dispatch_lock:
-            body = await asyncio.get_running_loop().run_in_executor(_TOOL_EXECUTOR, ctx.run, fn)
-        return HTMLResponse(body)
-    except Exception:
-        logger.exception("ui render failed")
-        return HTMLResponse(
-            "<h1>render error</h1><p>see ~/.mempalace/logs/daemon.log</p>",
-            status_code=500,
-        )
-
-
 async def render_json(fn: Callable[[], Any]) -> Response:
     """JSON sibling of ``_render``: same lock + executor, dict-out.
 
@@ -123,88 +102,68 @@ async def render_json(fn: Callable[[], Any]) -> Response:
         )
 
 
-async def ui_index(_: Request) -> Response:
-    return await _render(web_ui.render_index)
-
-
-async def ui_wing(request: Request) -> Response:
-    wing = request.path_params["wing"]
-    return await _render(lambda: web_ui.render_wing(wing))
-
-
-async def ui_room(request: Request) -> Response:
-    wing = request.path_params["wing"]
-    room = request.path_params["room"]
-    try:
-        offset = int(request.query_params.get("offset", "0"))
-    except ValueError:
-        offset = 0
-    try:
-        limit = int(request.query_params.get("limit", "50"))
-    except ValueError:
-        limit = 50
-    return await _render(lambda: web_ui.render_room(wing, room, offset, limit))
-
-
-async def ui_drawer(request: Request) -> Response:
-    drawer_id = request.path_params["drawer_id"]
-    return await _render(lambda: web_ui.render_drawer(drawer_id))
-
-
-async def ui_search(request: Request) -> Response:
-    q = request.query_params.get("q", "")
-    wing = request.query_params.get("wing", "") or None
-    room = request.query_params.get("room", "") or None
-    try:
-        limit = int(request.query_params.get("limit", "10"))
-    except ValueError:
-        limit = 10
-    return await _render(lambda: web_ui.render_search(q, wing, room, limit))
-
-
-async def ui_recent(request: Request) -> Response:
-    try:
-        limit = int(request.query_params.get("limit", "50"))
-    except ValueError:
-        limit = 50
-    return await _render(lambda: web_ui.render_recent(limit))
-
-
-async def ui_kg(_: Request) -> Response:
-    return await _render(web_ui.render_kg)
-
-
-async def ui_kg_entity(request: Request) -> Response:
-    name = request.query_params.get("name", "")
-    return await _render(lambda: web_ui.render_kg_entity(name))
-
-
-async def ui_kg_graph(request: Request) -> Response:
-    name = request.query_params.get("entity", "")
-    try:
-        hops = int(request.query_params.get("hops", "1") or "1")
-    except ValueError:
-        hops = 1
-    return await _render(lambda: web_ui.render_kg_graph(name, hops=hops))
-
-
-async def ui_health(_: Request) -> Response:
-    return await _render(web_ui.render_health)
-
-
-async def ui_operations(request: Request) -> Response:
-    try:
-        days = int(request.query_params.get("days", "30") or "30")
-    except ValueError:
-        days = 30
-    bucket = request.query_params.get("bucket") or None
-    if bucket == "":
-        bucket = None
-    return await _render(lambda: web_ui.render_operations(days=days, bucket=bucket))
-
-
 async def root(_: Request) -> Response:
-    return RedirectResponse("/ui/", status_code=307)
+    return RedirectResponse("/app/", status_code=307)
+
+
+# ── /ui/* legacy redirects ────────────────────────────────────────────────
+#
+# The server-rendered HTML pane was replaced by the SPA at /app/ (the
+# "Phase 6 cutover"). The handler below 301s every old URL to its new
+# /app/ equivalent so external bookmarks, beads links, and prior
+# screenshots keep resolving. Once nothing in the wild references /ui/
+# anymore the whole block can disappear.
+
+_LEGACY_LEAVES = {
+    "search": "/app/search",
+    "recent": "/app/ops",
+    "operations": "/app/ops",
+    "kg": "/app/kg",
+    "health": "/app/health",
+}
+
+
+def _legacy_to_app(path: str, query: str) -> str:
+    """Translate a stripped ``/ui/<path>?<query>`` to the new ``/app`` URL.
+
+    Always returns the final URL including query string. The caller does
+    not need to append anything.
+    """
+    if path in ("", "/"):
+        return _with_query("/app/", query)
+    parts = path.strip("/").split("/")
+    head = parts[0]
+    if head == "wing" and len(parts) == 2:
+        return _with_query(f"/app/wings/{parts[1]}", query)
+    if head == "wing" and len(parts) >= 3:
+        return _with_query(f"/app/wings/{parts[1]}/{parts[2]}", query)
+    if head == "drawer" and len(parts) >= 2:
+        return _with_query("/app/drawers/" + "/".join(parts[1:]), query)
+    if head == "kg" and len(parts) >= 2 and parts[1] == "entity":
+        # ?name=Alice → /app/kg/Alice. Strip the consumed param.
+        from urllib.parse import parse_qs, urlencode
+
+        params = parse_qs(query, keep_blank_values=True)
+        name_list = params.pop("name", None)
+        name = name_list[0] if name_list else ""
+        remaining = urlencode(params, doseq=True)
+        target = f"/app/kg/{name}" if name else "/app/kg"
+        return target + (f"?{remaining}" if remaining else "")
+    if head == "kg" and len(parts) >= 2 and parts[1] == "graph":
+        return _with_query("/app/kg", query)
+    if head in _LEGACY_LEAVES and len(parts) == 1:
+        return _with_query(_LEGACY_LEAVES[head], query)
+    return "/app/"
+
+
+def _with_query(target: str, query: str) -> str:
+    return f"{target}?{query}" if query else target
+
+
+async def legacy_ui_redirect(request: Request) -> Response:
+    rest = request.path_params.get("rest", "") or ""
+    target = _legacy_to_app(rest, request.url.query)
+    return RedirectResponse(target, status_code=301)
 
 
 def _web_dist_dir() -> Path:
@@ -244,17 +203,10 @@ def build_app() -> Starlette:
         Route("/", root, methods=["GET"]),
         Route("/mcp", mcp_endpoint, methods=["POST"]),
         Route("/healthz", healthz, methods=["GET"]),
-        Route("/ui/", ui_index, methods=["GET"]),
-        Route("/ui/wing/{wing}", ui_wing, methods=["GET"]),
-        Route("/ui/wing/{wing}/{room}", ui_room, methods=["GET"]),
-        Route("/ui/drawer/{drawer_id:path}", ui_drawer, methods=["GET"]),
-        Route("/ui/search", ui_search, methods=["GET"]),
-        Route("/ui/recent", ui_recent, methods=["GET"]),
-        Route("/ui/kg", ui_kg, methods=["GET"]),
-        Route("/ui/kg/entity", ui_kg_entity, methods=["GET"]),
-        Route("/ui/kg/graph", ui_kg_graph, methods=["GET"]),
-        Route("/ui/health", ui_health, methods=["GET"]),
-        Route("/ui/operations", ui_operations, methods=["GET"]),
+        # Legacy /ui/* permanent-redirects so external bookmarks survive.
+        Route("/ui", legacy_ui_redirect, methods=["GET"]),
+        Route("/ui/", legacy_ui_redirect, methods=["GET"]),
+        Route("/ui/{rest:path}", legacy_ui_redirect, methods=["GET"]),
     ]
     routes.extend(http_api.routes())
     web_dist = _web_dist_dir()

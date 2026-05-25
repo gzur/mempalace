@@ -63,6 +63,9 @@ uv run ruff format --check .
 ```
 mempalace/
 ├── mcp_server.py        # MCP server — all read/write tools
+├── http_server.py       # Starlette HTTP daemon: /mcp, /api/v1/*, /app/* static
+├── http_api.py          # /api/v1/* JSON endpoints (thin wrappers over tool_*)
+├── wal_series.py        # Pure WAL load/bucket/fill helpers (shared by API + tests)
 ├── cli.py               # CLI dispatcher
 ├── config.py            # Configuration + input validation
 ├── miner.py             # Project file miner
@@ -88,12 +91,33 @@ mempalace/
 ├── hooks_cli.py         # Hook management CLI
 ├── query_sanitizer.py   # Prompt contamination prevention
 ├── split_mega_files.py  # Split concatenated transcript files
-└── version.py           # Single source of truth for version
+├── version.py           # Single source of truth for version
+├── web/                 # SPA source (Vite + React + TanStack Router + Tailwind)
+│   ├── package.json
+│   ├── vite.config.ts
+│   └── src/{routes,components,api,lib}
+└── web_dist/            # Built SPA bundle (committed; served at /app/)
 
 hooks/                   # Claude Code hook scripts
 ├── mempal_save_hook.sh        # Stop: triggers diary save
 └── mempal_precompact_hook.sh  # PreCompact: saves state before compression
 ```
+
+### Web UI
+
+The daemon serves the React SPA at `/app/` from `mempalace/web_dist`.
+`/` redirects there; the legacy `/ui/*` URLs 301-redirect to their `/app/*`
+equivalents for old bookmarks. JSON read endpoints live at `/api/v1/*`.
+
+```
+cd mempalace/web
+npm install        # one time
+npm run dev        # HMR at http://127.0.0.1:5173, proxies /api → daemon
+npm run build      # rebuilds web_dist/ — commit the diff with source changes
+npm test           # vitest
+```
+
+`web_dist/` is committed so `pip install mempalace` works without Node.
 
 ## Conventions
 
@@ -126,6 +150,9 @@ Knowledge Graph:
 ## Key Files for Common Tasks
 
 - **Adding an MCP tool**: `mempalace/mcp_server.py` — add handler function + TOOLS dict entry
+- **Adding a /api/v1/ endpoint**: `mempalace/http_api.py` — thin wrapper, add `Route` to `routes()`
+- **Adding a SPA page**: `mempalace/web/src/routes/<name>.tsx` (TanStack Router file-based) +
+  optional `useFooQuery` hook in `src/api/queries.ts`; rebuild with `npm run build`
 - **Changing search**: `mempalace/searcher.py`
 - **Modifying mining**: `mempalace/miner.py` (project files) or `mempalace/convo_miner.py` (transcripts)
 - **Adding a storage backend**: subclass `mempalace/backends/base.py`, register in `backends/__init__.py`
