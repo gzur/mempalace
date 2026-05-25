@@ -12,7 +12,9 @@ import pytest
 import mempalace.hooks_cli as hooks_cli_mod
 from mempalace.hooks_cli import (
     SAVE_INTERVAL,
+    _client_tag_for_cwd,
     _count_human_messages,
+    _ensure_client_header,
     _extract_recent_messages,
     _get_mine_targets,
     _log,
@@ -1333,3 +1335,168 @@ def test_regular_file_at_palace_root_treated_as_absent(tmp_path, monkeypatch):
     # The stray file is left untouched; we never try to convert it.
     assert fake_root.is_file()
     assert fake_root.read_text() == "oops, this is a file not a directory"
+
+
+# --- X-Mempalace-Client header sync ----------------------------------------
+
+
+def _fixture_claude_config() -> dict:
+    return {
+        "mcpServers": {
+            "mempalace": {"type": "http", "url": "http://127.0.0.1:9876/mcp"},
+        },
+        "projects": {
+            "/Users/gzur/repos/mempalace": {
+                "mcpServers": {
+                    "mempalace": {
+                        "type": "http",
+                        "url": "http://127.0.0.1:9876/mcp",
+                    },
+                },
+            },
+            "/Users/gzur/repos/legacy-app": {
+                "mcpServers": {
+                    "mempalace": {
+                        "type": "http",
+                        "url": "http://127.0.0.1:9876/mcp",
+                        "headers": {"X-Mempalace-Client": "claude-code/legacy-app"},
+                    },
+                },
+            },
+        },
+    }
+
+
+class TestClientTagForCwd:
+    def test_basename_becomes_suffix(self):
+        assert _client_tag_for_cwd("/Users/gzur/repos/mempalace") == "claude-code/mempalace"
+
+    def test_strange_characters_are_sanitized(self):
+        # Spaces/punctuation collapse to underscores; trailing underscores
+        # are stripped so the tag stays tidy.
+        assert (
+            _client_tag_for_cwd("/tmp/has spaces & symbols!")
+            == "claude-code/has_spaces___symbols"
+        )
+
+    def test_root_falls_back_to_bare_tag(self):
+        assert _client_tag_for_cwd("/") == "claude-code"
+
+
+class TestEnsureClientHeader:
+    def test_adds_header_when_project_entry_lacks_one(self, tmp_path):
+        cfg_path = tmp_path / "claude.json"
+        cfg_path.write_text(json.dumps(_fixture_claude_config()))
+
+        tag, changed = _ensure_client_header(
+            "/Users/gzur/repos/mempalace", config_path=cfg_path
+        )
+
+        assert tag == "claude-code/mempalace"
+        assert changed is True
+        loaded = json.loads(cfg_path.read_text())
+        headers = loaded["projects"]["/Users/gzur/repos/mempalace"]["mcpServers"][
+            "mempalace"
+        ]["headers"]
+        assert headers == {"X-Mempalace-Client": "claude-code/mempalace"}
+
+    def test_noop_when_header_already_matches(self, tmp_path):
+        cfg_path = tmp_path / "claude.json"
+        cfg_path.write_text(json.dumps(_fixture_claude_config()))
+
+        # legacy-app already has the right header in the fixture
+        tag, changed = _ensure_client_header(
+            "/Users/gzur/repos/legacy-app", config_path=cfg_path
+        )
+
+        assert tag == "claude-code/legacy-app"
+        assert changed is False
+
+    def test_overwrites_stale_value(self, tmp_path):
+        cfg = _fixture_claude_config()
+        cfg["projects"]["/Users/gzur/repos/legacy-app"]["mcpServers"]["mempalace"][
+            "headers"
+        ]["X-Mempalace-Client"] = "claude-code/old-name"
+        cfg_path = tmp_path / "claude.json"
+        cfg_path.write_text(json.dumps(cfg))
+
+        tag, changed = _ensure_client_header(
+            "/Users/gzur/repos/legacy-app", config_path=cfg_path
+        )
+
+        assert changed is True
+        loaded = json.loads(cfg_path.read_text())
+        assert (
+            loaded["projects"]["/Users/gzur/repos/legacy-app"]["mcpServers"]["mempalace"][
+                "headers"
+            ]["X-Mempalace-Client"]
+            == tag
+        )
+
+    def test_does_not_fabricate_missing_project(self, tmp_path):
+        # cwd has no entry under ``projects`` → we must not invent one.
+        cfg_path = tmp_path / "claude.json"
+        cfg_path.write_text(json.dumps(_fixture_claude_config()))
+
+        _, changed = _ensure_client_header(
+            "/nowhere/in/config", config_path=cfg_path
+        )
+
+        assert changed is False
+        loaded = json.loads(cfg_path.read_text())
+        assert "/nowhere/in/config" not in loaded["projects"]
+
+    def test_seeds_from_global_mempalace_when_per_project_missing(self, tmp_path):
+        # Project has empty mcpServers but a global mempalace entry exists.
+        # We seed a per-project override (same url) and add the header.
+        cfg = _fixture_claude_config()
+        cfg["projects"]["/Users/gzur/repos/mempalace"]["mcpServers"] = {}
+        cfg_path = tmp_path / "claude.json"
+        cfg_path.write_text(json.dumps(cfg))
+
+        tag, changed = _ensure_client_header(
+            "/Users/gzur/repos/mempalace", config_path=cfg_path
+        )
+
+        assert changed is True
+        loaded = json.loads(cfg_path.read_text())
+        project_mp = loaded["projects"]["/Users/gzur/repos/mempalace"]["mcpServers"][
+            "mempalace"
+        ]
+        assert project_mp["type"] == "http"
+        assert project_mp["url"] == "http://127.0.0.1:9876/mcp"
+        assert project_mp["headers"]["X-Mempalace-Client"] == tag
+
+    def test_skips_when_neither_global_nor_per_project_mempalace_exists(self, tmp_path):
+        # Neither global nor per-project mempalace; user isn't using us.
+        cfg = _fixture_claude_config()
+        del cfg["mcpServers"]
+        cfg["projects"]["/Users/gzur/repos/mempalace"]["mcpServers"] = {}
+        cfg_path = tmp_path / "claude.json"
+        cfg_path.write_text(json.dumps(cfg))
+
+        _, changed = _ensure_client_header(
+            "/Users/gzur/repos/mempalace", config_path=cfg_path
+        )
+
+        assert changed is False
+
+    def test_missing_config_is_tolerated(self, tmp_path):
+        # No ~/.claude.json on disk → return the tag, change nothing.
+        tag, changed = _ensure_client_header(
+            "/Users/gzur/repos/mempalace", config_path=tmp_path / "absent.json"
+        )
+        assert tag == "claude-code/mempalace"
+        assert changed is False
+
+    def test_write_false_does_not_touch_file(self, tmp_path):
+        cfg_path = tmp_path / "claude.json"
+        original = json.dumps(_fixture_claude_config())
+        cfg_path.write_text(original)
+
+        tag, changed = _ensure_client_header(
+            "/Users/gzur/repos/mempalace", config_path=cfg_path, write=False
+        )
+        assert tag == "claude-code/mempalace"
+        assert changed is True
+        assert cfg_path.read_text() == original

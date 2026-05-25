@@ -119,6 +119,20 @@ npm test           # vitest
 
 `web_dist/` is committed so `pip install mempalace` works without Node.
 
+### Agent attribution
+
+Every drawer write records a free-form ``client`` metadata field captured
+from the ``X-Mempalace-Client`` HTTP header on the request that produced
+it. The SPA surfaces it in the drawer detail page above the verbatim
+content (alongside ``added_by`` and ``filed_at``).
+
+The SessionStart hook auto-configures this header per project: on each
+Claude Code session start, ``hook_session_start`` derives a tag like
+``claude-code/<basename(cwd)>`` and writes it into
+``~/.claude.json → projects.<cwd>.mcpServers.mempalace.headers``,
+seeding the per-project block from the global ``mcpServers.mempalace``
+when one doesn't exist yet.
+
 ## Conventions
 
 - **Python style**: snake_case for functions/variables, PascalCase for classes

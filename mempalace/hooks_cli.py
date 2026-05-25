@@ -833,8 +833,118 @@ def hook_stop(data: dict, harness: str):
         _output({})
 
 
+_CLAUDE_CONFIG_PATH = Path.home() / ".claude.json"
+_CLIENT_HEADER = "X-Mempalace-Client"
+
+
+def _client_tag_for_cwd(cwd: str) -> str:
+    """Free-form attribution tag for the live project directory.
+
+    ``claude-code/<basename(cwd)>`` keeps the tag short and human-readable.
+    Falls back to ``claude-code`` when the cwd has no meaningful basename
+    (root, home, etc.).
+    """
+    base = os.path.basename(os.path.abspath(cwd))
+    # Strip whitespace + reduce odd characters; the value travels in an HTTP
+    # header and lands as drawer metadata so keep it conservative.
+    base = re.sub(r"[^A-Za-z0-9_\-.]", "_", base).strip("_")
+    if not base or base in (".", "..", "/"):
+        return "claude-code"
+    return f"claude-code/{base}"
+
+
+def _ensure_client_header(
+    cwd: str,
+    config_path: Path = _CLAUDE_CONFIG_PATH,
+    write: bool = True,
+) -> tuple[str, bool]:
+    """Make sure ~/.claude.json has X-Mempalace-Client set for ``cwd``.
+
+    Returns ``(tag, changed)``. ``changed`` is True when the file was
+    rewritten. When ``write=False`` we return the tag we *would* set
+    without touching the file — useful for the unit tests.
+
+    Behaviour:
+      - If projects/<cwd>/mcpServers/mempalace exists, ensure
+        ``headers.X-Mempalace-Client`` matches the derived tag.
+      - If it does not exist but the GLOBAL ``mcpServers.mempalace``
+        does, seed a thin per-project override (same URL, plus the
+        header) so the daemon can attribute writes to this project
+        without the user editing config by hand.
+      - If neither exists, the user isn't using mempalace via Claude
+        Code; do nothing.
+    """
+    tag = _client_tag_for_cwd(cwd)
+    if not config_path.is_file():
+        return tag, False
+    try:
+        raw = config_path.read_text(encoding="utf-8")
+        cfg = json.loads(raw)
+    except (OSError, json.JSONDecodeError):
+        _log(f"could not read {config_path} for header sync")
+        return tag, False
+
+    if not isinstance(cfg, dict):
+        return tag, False
+    projects = cfg.get("projects")
+    if not isinstance(projects, dict):
+        return tag, False
+    project = projects.get(cwd)
+    if not isinstance(project, dict):
+        return tag, False
+    mcp = project.get("mcpServers")
+    if not isinstance(mcp, dict):
+        mcp = {}
+        project["mcpServers"] = mcp
+    mempalace = mcp.get("mempalace")
+    if not isinstance(mempalace, dict):
+        # Seed from the global mcpServers.mempalace if present. Without a
+        # global template, we have nothing to copy and bail.
+        global_mcp = cfg.get("mcpServers")
+        if not isinstance(global_mcp, dict):
+            return tag, False
+        global_mempalace = global_mcp.get("mempalace")
+        if not isinstance(global_mempalace, dict):
+            return tag, False
+        mempalace = dict(global_mempalace)
+        mcp["mempalace"] = mempalace
+
+    headers = mempalace.get("headers")
+    if not isinstance(headers, dict):
+        headers = {}
+    if headers.get(_CLIENT_HEADER) == tag and isinstance(mempalace.get("headers"), dict):
+        return tag, False
+    headers[_CLIENT_HEADER] = tag
+    mempalace["headers"] = headers
+
+    if not write:
+        return tag, True
+
+    # Atomic write: stage to a sibling, fsync, rename. ~/.claude.json is
+    # read by Claude Code on every session start so a partial write is the
+    # one thing we have to avoid.
+    tmp = config_path.with_suffix(config_path.suffix + ".mempalace.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, config_path)
+    except OSError:
+        _log(f"could not rewrite {config_path}")
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return tag, False
+    return tag, True
+
+
 def hook_session_start(data: dict, harness: str):
-    """Session start hook: initialize session tracking state."""
+    """Session start hook: initialize session tracking state and sync the
+    per-project X-Mempalace-Client header into ~/.claude.json so the
+    daemon can attribute every write to <agent>/<project>.
+    """
     if not _palace_root_exists():
         _output({})
         return
@@ -845,6 +955,18 @@ def hook_session_start(data: dict, harness: str):
 
     # Initialize session state directory
     STATE_DIR.mkdir(parents=True, exist_ok=True)
+
+    # PWD here = the Claude Code project root (the harness spawns the hook
+    # as a subprocess of itself). Sync the header iff a per-project
+    # mempalace MCP server is already configured for it.
+    try:
+        cwd = os.getcwd()
+        tag, changed = _ensure_client_header(cwd)
+        if changed:
+            _log(f"updated X-Mempalace-Client → {tag} for project {cwd}")
+    except Exception as e:
+        # Never let header sync block session start.
+        _log(f"X-Mempalace-Client sync failed: {e}")
 
     # Pass through — no blocking on session start
     _output({})
