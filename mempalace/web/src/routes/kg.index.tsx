@@ -14,7 +14,7 @@ interface Search {
   maxNodes?: number;
 }
 
-export const Route = createFileRoute("/kg")({
+export const Route = createFileRoute("/kg/")({
   component: KGPage,
   validateSearch: (s: Record<string, unknown>): Search => ({
     q: typeof s.q === "string" && s.q ? s.q : undefined,
@@ -43,7 +43,7 @@ const TYPE_PALETTE: Record<string, string> = {
 
 function KGPage() {
   const search = Route.useSearch();
-  const navigate = useNavigate({ from: "/kg" });
+  const navigate = useNavigate({ from: "/kg/" });
   const includeExpired = search.includeExpired ?? false;
   const maxNodes = search.maxNodes;
 

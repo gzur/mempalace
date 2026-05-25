@@ -3,7 +3,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { usePalaceWings } from "@/api/queries";
 import { formatInt } from "@/lib/format";
 
-export const Route = createFileRoute("/wings")({
+export const Route = createFileRoute("/wings/")({
   component: WingsList,
 });
 
