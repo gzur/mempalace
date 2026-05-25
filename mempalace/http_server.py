@@ -189,17 +189,48 @@ def _web_dist_dir() -> Path:
 
 
 class _SPAStaticFiles(StaticFiles):
-    """``StaticFiles`` that falls back to ``index.html`` on 404.
+    """``StaticFiles`` that falls back to ``index.html`` on 404 — but only
+    for client-router paths, never for asset requests.
 
     Required so a deep link like ``/app/kg/graph`` — which has no
     corresponding file on disk because the client router owns it — resolves
-    to the SPA shell instead of returning 404. Without this, refreshing the
-    browser on any non-root route gives a broken page.
+    to the SPA shell instead of returning 404.
+
+    Critical exception: requests under ``/assets/`` or any path with a
+    common asset file-extension (``.js``, ``.css``, ``.map``, ...) must
+    return a real 404. After a rebuild the bundle's hashed filenames
+    change; an old tab requesting a now-missing chunk has to see a 404
+    so the browser surfaces the rotated-bundle error honestly instead
+    of trying to ``import()`` an HTML document.
 
     Starlette's StaticFiles raises ``HTTPException(404)`` when a path is
     not found, rather than returning a Response — catch that, not a 404
     Response.
     """
+
+    _ASSET_EXTENSIONS = (
+        ".js",
+        ".mjs",
+        ".css",
+        ".map",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".svg",
+        ".webp",
+        ".woff",
+        ".woff2",
+        ".ttf",
+        ".ico",
+        ".json",
+    )
+
+    def _looks_like_asset(self, path: str) -> bool:
+        p = path.lower()
+        if p.startswith("assets/") or "/assets/" in p:
+            return True
+        return p.endswith(self._ASSET_EXTENSIONS)
 
     async def get_response(self, path: str, scope):
         from starlette.exceptions import HTTPException
@@ -207,10 +238,10 @@ class _SPAStaticFiles(StaticFiles):
         try:
             response = await super().get_response(path, scope)
         except HTTPException as e:
-            if e.status_code != 404:
+            if e.status_code != 404 or self._looks_like_asset(path):
                 raise
             return await super().get_response("index.html", scope)
-        if response.status_code == 404:
+        if response.status_code == 404 and not self._looks_like_asset(path):
             return await super().get_response("index.html", scope)
         return response
 

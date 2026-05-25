@@ -242,3 +242,15 @@ class TestStaticFilesMount:
         r = app_client.get("/app/kg/graph")
         assert r.status_code == 200
         assert '<div id="root"></div>' in r.text
+
+    def test_app_missing_asset_returns_404_not_html(self, app_client):
+        # After a bundle rotation, an old tab will request a hash that no
+        # longer exists. That path MUST 404 (not return index.html dressed
+        # as JS) so the browser surfaces 'failed to fetch dynamic import'
+        # honestly instead of trying to parse HTML as a module.
+        r = app_client.get("/app/assets/wings-stale-hash.js")
+        assert r.status_code == 404
+
+    def test_app_missing_css_returns_404(self, app_client):
+        r = app_client.get("/app/assets/index-stale.css")
+        assert r.status_code == 404
