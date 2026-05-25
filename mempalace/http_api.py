@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import time
 from typing import Any, Callable, Optional
 
 from starlette.requests import Request
@@ -83,8 +84,43 @@ def _wrap(fn: Callable[[Request], Any]) -> Callable[[Request], Any]:
     return handler
 
 
+_SUMMARY_CACHE: dict[str, Any] = {"key": None, "value": None, "expires_at": 0.0}
+_SUMMARY_TTL = 30.0
+
+
 def palace_summary(_: Request) -> dict:
-    return mcp_server.tool_status()
+    """Drawer / wing / room counts for the dashboard.
+
+    Uses the read-only sqlite path via ``palace_sql.palace_summary`` rather
+    than ``mcp_server.tool_status`` because tool_status paginates over the
+    whole chromadb collection (~9s on a 91k-drawer palace). The sqlite
+    aggregate is ~400ms cold and trivially memoizable.
+
+    A 30s in-process TTL cache hides repeat calls (dashboard polls,
+    sidebar reloads) behind a single sqlite roundtrip. The cache key
+    incorporates the live palace_path so tests with separate temp
+    palaces don't see each other's results.
+    """
+    now = time.time()
+    key = str(getattr(mcp_server._config, "palace_path", ""))
+    if (
+        _SUMMARY_CACHE["value"] is not None
+        and _SUMMARY_CACHE["key"] == key
+        and now < _SUMMARY_CACHE["expires_at"]
+    ):
+        return _SUMMARY_CACHE["value"]
+    sql = palace_sql.palace_summary()
+    payload = {
+        "total_drawers": sql.get("total", 0),
+        "wings": sql.get("wings", {}),
+        "rooms": sql.get("rooms", {}),
+        "protocol": getattr(mcp_server, "PALACE_PROTOCOL", ""),
+        "aaak_dialect": getattr(mcp_server, "AAAK_SPEC", ""),
+    }
+    _SUMMARY_CACHE["key"] = key
+    _SUMMARY_CACHE["value"] = payload
+    _SUMMARY_CACHE["expires_at"] = now + _SUMMARY_TTL
+    return payload
 
 
 def palace_wings(_: Request) -> dict:
