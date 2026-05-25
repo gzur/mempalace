@@ -165,6 +165,41 @@ class TestKgEndpoints:
         assert body.get("entity") == "Alice"
 
 
+class TestKgMerge:
+    def test_post_merges_entities_via_api(self, app_client, kg):
+        # Seed two aliases — one fact under each spelling, plus an
+        # incoming reference to the alias we're folding away.
+        kg.add_entity("Gissur", entity_type="person")
+        kg.add_entity("Gissur Þórhallsson", entity_type="person")
+        kg.add_triple("Gissur", "evaluating", "VAST Iceland")
+        kg.add_triple("Gissur Þórhallsson", "works_at", "VAST Iceland")
+        kg.add_triple("VAST Iceland", "interviewed", "Gissur")
+
+        r = app_client.post(
+            "/api/v1/kg/merge",
+            json={"from": "Gissur", "into": "Gissur Þórhallsson"},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["success"] is True
+        # 1 subject rewrite (Gissur evaluating VAST) +
+        # 1 object rewrite  (VAST interviewed Gissur).
+        # The works_at row referenced the canonical spelling already.
+        assert body["subject_rewrites"] == 1
+        assert body["object_rewrites"] == 1
+        assert body["triples_rewritten"] == 2
+
+        dump = app_client.get("/api/v1/kg/graph").json()
+        names = {n["name"] for n in dump["nodes"]}
+        assert "Gissur" not in names
+        assert "Gissur Þórhallsson" in names
+
+    def test_missing_payload_returns_structured_error(self, app_client):
+        r = app_client.post("/api/v1/kg/merge", json={})
+        assert r.status_code == 200
+        assert r.json()["success"] is False
+
+
 class TestHealthEndpoint:
     def test_returns_overall_and_checks(self, app_client):
         r = app_client.get("/api/v1/health")

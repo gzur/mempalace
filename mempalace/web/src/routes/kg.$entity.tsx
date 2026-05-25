@@ -1,6 +1,7 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { useMemo, useState } from "react";
 
-import { useKGEntity, useKGGraph } from "@/api/queries";
+import { useKGEntity, useKGGraph, useKGMerge } from "@/api/queries";
 import { Breadcrumbs } from "@/components/Breadcrumbs";
 import { KGGraph } from "@/components/KGGraph";
 import { cn } from "@/lib/cn";
@@ -9,8 +10,103 @@ export const Route = createFileRoute("/kg/$entity")({
   component: EntityPage,
 });
 
+function MergeControl({
+  entity,
+  otherEntityNames,
+  onMerged,
+}: {
+  entity: string;
+  otherEntityNames: string[];
+  onMerged: (into: string) => void;
+}) {
+  const merge = useKGMerge();
+  const [target, setTarget] = useState("");
+  const datalistId = useMemo(
+    () => `merge-targets-${entity.replace(/[^a-zA-Z0-9]/g, "")}`,
+    [entity],
+  );
+  const trimmed = target.trim();
+  const canSubmit =
+    trimmed.length > 0 && trimmed !== entity && !merge.isPending;
+
+  return (
+    <section className="rounded border border-[color:var(--color-border)] bg-[color:var(--color-surface)] p-3">
+      <h2 className="mb-2 text-[11px] uppercase tracking-wide text-[color:var(--color-muted)]">
+        merge into…
+      </h2>
+      <p className="mb-2 text-[11px] text-[color:var(--color-muted)]">
+        Fold this entity into another (e.g. an alias). Every triple
+        referencing <code>{entity}</code> will be rewritten to point at
+        the target, then this entity is deleted.
+      </p>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!canSubmit) return;
+          merge.mutate(
+            { from: entity, into: trimmed },
+            {
+              onSuccess: (data) => {
+                if (data.success) {
+                  onMerged(data.into ?? trimmed);
+                }
+              },
+            },
+          );
+        }}
+        className="flex flex-wrap items-center gap-2 text-[12px]"
+      >
+        <input
+          list={datalistId}
+          value={target}
+          onChange={(e) => setTarget(e.target.value)}
+          placeholder="canonical entity name"
+          className="flex-1 rounded border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 py-1 outline-none focus:border-[color:var(--color-accent)]"
+        />
+        <datalist id={datalistId}>
+          {otherEntityNames.slice(0, 500).map((n) => (
+            <option key={n} value={n} />
+          ))}
+        </datalist>
+        <button
+          type="submit"
+          disabled={!canSubmit}
+          className={cn(
+            "rounded border px-3 py-1",
+            canSubmit
+              ? "border-[color:var(--color-accent)] bg-[color:var(--color-accent)] text-[color:var(--color-accent-fg)]"
+              : "border-[color:var(--color-border)] text-[color:var(--color-muted)]",
+          )}
+        >
+          {merge.isPending ? "merging…" : "merge"}
+        </button>
+      </form>
+      {merge.data && (
+        <p
+          className={cn(
+            "mt-2 text-[12px]",
+            merge.data.success
+              ? "text-[color:var(--color-success)]"
+              : "text-[color:var(--color-danger)]",
+          )}
+        >
+          {merge.data.success
+            ? `rewrote ${merge.data.triples_rewritten ?? 0} triple(s) from ${merge.data.from} → ${merge.data.into}`
+            : (merge.data.error ?? "merge failed")}
+        </p>
+      )}
+      {merge.isError && (
+        <p className="mt-2 text-[12px] text-[color:var(--color-danger)]">
+          {(merge.error as Error).message}
+        </p>
+      )}
+    </section>
+  );
+}
+
 function EntityPage() {
   const { entity } = Route.useParams();
+  const navigate = useNavigate();
   const facts = useKGEntity(entity, "both");
   // Reuse the same full-graph dump and let the SPA narrow client-side
   // to the entity's neighbors. Cheap because the dump is cached by
@@ -66,6 +162,18 @@ function EntityPage() {
           }}
         />
       )}
+
+      <MergeControl
+        entity={entity}
+        otherEntityNames={
+          fullGraph.data?.nodes
+            .map((n) => n.name)
+            .filter((n) => n !== entity) ?? []
+        }
+        onMerged={(into) => {
+          navigate({ to: "/kg/$entity", params: { entity: into } });
+        }}
+      />
 
       {facts.data?.error && (
         <p className="text-[color:var(--color-warn)]">{facts.data.error}</p>

@@ -84,6 +84,29 @@ def _wrap(fn: Callable[[Request], Any]) -> Callable[[Request], Any]:
     return handler
 
 
+def _wrap_post(fn: Callable[[Request, dict], Any]) -> Callable[[Request], Any]:
+    """Sibling of ``_wrap`` for POST endpoints that consume a JSON body.
+
+    Reads + parses the body asynchronously before acquiring the dispatch
+    lock so the (single-threaded) executor stays free of network I/O. The
+    body falls back to an empty dict on parse failure — handlers should
+    pull keys with ``.get(...)`` and return a structured error themselves.
+    """
+
+    async def handler(request: Request) -> Response:
+        from . import http_server
+
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        return await http_server.render_json(lambda: fn(request, body))
+
+    return handler
+
+
 _SUMMARY_CACHE: dict[str, Any] = {"key": None, "value": None, "expires_at": 0.0}
 _SUMMARY_TTL = 30.0
 
@@ -199,6 +222,14 @@ def kg_timeline(request: Request) -> dict:
     return mcp_server.tool_kg_timeline(entity=entity)
 
 
+def kg_merge(_request: Request, body: dict) -> dict:
+    """Merge one KG entity into another. POST {from, into}."""
+    return mcp_server.tool_kg_merge(
+        from_name=str(body.get("from", "") or ""),
+        into_name=str(body.get("into", "") or ""),
+    )
+
+
 def kg_graph(request: Request) -> dict:
     include_expired = _opt_bool(request, "include_expired", default=False)
     max_nodes_raw = request.query_params.get("max_nodes")
@@ -238,6 +269,7 @@ def routes() -> list[Route]:
         Route("/api/v1/kg/entity", _wrap(kg_entity), methods=["GET"]),
         Route("/api/v1/kg/timeline", _wrap(kg_timeline), methods=["GET"]),
         Route("/api/v1/kg/graph", _wrap(kg_graph), methods=["GET"]),
+        Route("/api/v1/kg/merge", _wrap_post(kg_merge), methods=["POST"]),
         Route("/api/v1/health", _wrap(health_endpoint), methods=["GET"]),
     ]
 

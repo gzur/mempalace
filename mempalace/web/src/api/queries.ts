@@ -5,7 +5,7 @@
  * component that needs server state. Components call ``useFooQuery`` and
  * never touch ``api()`` directly.
  */
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api } from "./client";
 import type {
@@ -159,5 +159,36 @@ export function useHealth() {
     queryKey: queryKeys.health,
     queryFn: () => api<HealthResponse>("/api/v1/health"),
     refetchInterval: 30_000,
+  });
+}
+
+export interface KGMergeResponse {
+  success: boolean;
+  from?: string;
+  into?: string;
+  subject_rewrites?: number;
+  object_rewrites?: number;
+  triples_rewritten?: number;
+  error?: string;
+  note?: string;
+}
+
+/**
+ * Fold one KG entity into another. On success invalidates every KG
+ * query so the graph view, entity pages, and stats redraw against the
+ * post-merge data.
+ */
+export function useKGMerge() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { from: string; into: string }) =>
+      api<KGMergeResponse>("/api/v1/kg/merge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(vars),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["kg"] });
+    },
   });
 }

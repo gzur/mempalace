@@ -1571,6 +1571,34 @@ def tool_kg_invalidate(subject: str, predicate: str, object: str, ended: str = N
     }
 
 
+def tool_kg_merge(from_name: str, into_name: str) -> dict:
+    """Fold ``from_name`` into ``into_name``.
+
+    Every triple where subject or object references ``from_name`` is
+    rewritten to point at ``into_name``, then the ``from_name`` entity
+    row is deleted. Use this to collapse alias duplicates (e.g.
+    ``Gissur`` and ``Gissur Þórhallsson``) into one canonical node.
+    Auto-creates ``into_name`` if it does not exist yet, so this tool
+    also doubles as "rename".
+    """
+    try:
+        from_name = sanitize_kg_value(from_name, "from_name")
+        into_name = sanitize_kg_value(into_name, "into_name")
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+
+    _wal_log(
+        "kg_merge",
+        {"from": from_name, "into": into_name},
+    )
+
+    try:
+        result = _call_kg(lambda kg: kg.merge_entities(from_name, into_name))
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+    return result
+
+
 def tool_kg_timeline(entity: str = None):
     """Get chronological timeline of facts, optionally for one entity."""
     if entity is not None:
@@ -2038,6 +2066,24 @@ TOOLS = {
             },
         },
         "handler": tool_kg_timeline,
+    },
+    "mempalace_kg_merge": {
+        "description": "Fold one entity into another. Rewrites every triple referencing 'from' to point at 'into', then deletes 'from'. Use to collapse alias duplicates (e.g. 'Gissur' + 'Gissur Þórhallsson' → one node). Auto-creates 'into' if missing, so this also serves as rename.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "from_name": {
+                    "type": "string",
+                    "description": "Entity name to merge away (will be deleted)",
+                },
+                "into_name": {
+                    "type": "string",
+                    "description": "Canonical entity name to merge into",
+                },
+            },
+            "required": ["from_name", "into_name"],
+        },
+        "handler": tool_kg_merge,
     },
     "mempalace_kg_stats": {
         "description": "Knowledge graph overview: entities, triples, current vs expired facts, relationship types.",

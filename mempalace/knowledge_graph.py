@@ -357,6 +357,90 @@ class KnowledgeGraph:
                     (ended, sub_id, pred, obj_id),
                 )
 
+    # ── Merge ─────────────────────────────────────────────────────────────
+
+    def merge_entities(self, from_name: str, into_name: str) -> dict:
+        """Fold ``from_name`` into ``into_name``.
+
+        Every triple where ``subject`` or ``object`` matches the source
+        entity is rewritten to reference the target entity, then the source
+        entity row is deleted. The operation is wrapped in a single
+        transaction so a crash mid-merge leaves no dangling FKs.
+
+        Returns ``{success, from, into, subject_rewrites, object_rewrites,
+        triples_rewritten}``. ``triples_rewritten`` counts each updated row
+        once; a triple that mentioned the source on both sides
+        (self-referential after merge) is counted in both ``subject_`` and
+        ``object_rewrites`` but only once in the total.
+
+        Raises ``ValueError`` if either entity name is empty or if the
+        source entity does not exist. Merging an entity into itself is a
+        no-op (returns ``success=True`` with zero rewrites).
+        """
+        if not from_name or not from_name.strip():
+            raise ValueError("from_name is required")
+        if not into_name or not into_name.strip():
+            raise ValueError("into_name is required")
+        from_id = self._entity_id(from_name)
+        into_id = self._entity_id(into_name)
+        if from_id == into_id:
+            return {
+                "success": True,
+                "from": from_name,
+                "into": into_name,
+                "subject_rewrites": 0,
+                "object_rewrites": 0,
+                "triples_rewritten": 0,
+                "note": "from and into resolve to the same entity id",
+            }
+
+        with self._lock:
+            conn = self._conn()
+            from_row = conn.execute(
+                "SELECT name FROM entities WHERE id = ?", (from_id,)
+            ).fetchone()
+            if not from_row:
+                raise ValueError(f"entity {from_name!r} not found")
+            # Auto-create the target if it doesn't exist yet — protects
+            # against case where the canonical spelling has only ever been
+            # written via add_triple (object side) and never via add_entity.
+            into_row = conn.execute(
+                "SELECT name FROM entities WHERE id = ?", (into_id,)
+            ).fetchone()
+
+            with conn:
+                if not into_row:
+                    conn.execute(
+                        "INSERT INTO entities (id, name) VALUES (?, ?)",
+                        (into_id, into_name),
+                    )
+                # Count which triples touch both sides so we don't
+                # double-count them in the summary total.
+                both_sides = conn.execute(
+                    "SELECT COUNT(*) FROM triples WHERE subject = ? AND object = ?",
+                    (from_id, from_id),
+                ).fetchone()[0]
+                cur_s = conn.execute(
+                    "UPDATE triples SET subject = ? WHERE subject = ?",
+                    (into_id, from_id),
+                )
+                s_rewrites = cur_s.rowcount or 0
+                cur_o = conn.execute(
+                    "UPDATE triples SET object = ? WHERE object = ?",
+                    (into_id, from_id),
+                )
+                o_rewrites = cur_o.rowcount or 0
+                conn.execute("DELETE FROM entities WHERE id = ?", (from_id,))
+
+        return {
+            "success": True,
+            "from": from_name,
+            "into": into_name,
+            "subject_rewrites": s_rewrites,
+            "object_rewrites": o_rewrites,
+            "triples_rewritten": s_rewrites + o_rewrites - both_sides,
+        }
+
     # ── Query operations ──────────────────────────────────────────────────
 
     def query_entity(self, name: str, as_of: str = None, direction: str = "outgoing"):

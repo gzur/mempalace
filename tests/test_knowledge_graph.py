@@ -322,3 +322,112 @@ class TestKnowledgeGraphConnectionCleanup:
         assert kg._connection is None
         with pytest.raises(sqlite3.ProgrammingError):
             conn.execute("SELECT 1")
+
+
+class TestMergeEntities:
+    """``merge_entities`` folds duplicate-by-alias entities into one canonical
+    row and rewrites every triple that referenced the duplicate."""
+
+    @pytest.fixture
+    def kg(self, tmp_path):
+        kg = KnowledgeGraph(str(tmp_path / "kg.sqlite3"))
+        # Two spellings of the same person, plus an unrelated entity.
+        kg.add_entity("Gissur Þórhallsson", entity_type="person")
+        kg.add_entity("Gissur", entity_type="person")
+        kg.add_entity("VAST Iceland", entity_type="org")
+        # Facts split across both aliases:
+        kg.add_triple("Gissur Þórhallsson", "works_at", "VAST Iceland")
+        kg.add_triple("Gissur", "evaluating", "VAST Iceland")
+        kg.add_triple("VAST Iceland", "interviewed", "Gissur")
+        yield kg
+        kg.close()
+
+    def test_rewrites_subject_and_object_then_drops_source(self, kg):
+        result = kg.merge_entities("Gissur", "Gissur Þórhallsson")
+
+        assert result["success"] is True
+        assert result["subject_rewrites"] == 1
+        assert result["object_rewrites"] == 1
+        assert result["triples_rewritten"] == 2
+
+        # Source entity is gone.
+        conn = kg._conn()
+        assert (
+            conn.execute(
+                "SELECT 1 FROM entities WHERE id = ?", (kg._entity_id("Gissur"),)
+            ).fetchone()
+            is None
+        )
+        # Target still there, and now owns all three triples.
+        target_id = kg._entity_id("Gissur Þórhallsson")
+        rows = conn.execute(
+            "SELECT predicate, subject, object FROM triples ORDER BY predicate"
+        ).fetchall()
+        triples = [(r["predicate"], r["subject"], r["object"]) for r in rows]
+        assert sorted(triples) == sorted(
+            [
+                ("works_at", target_id, kg._entity_id("VAST Iceland")),
+                ("evaluating", target_id, kg._entity_id("VAST Iceland")),
+                ("interviewed", kg._entity_id("VAST Iceland"), target_id),
+            ]
+        )
+
+    def test_query_entity_sees_merged_facts(self, kg):
+        kg.merge_entities("Gissur", "Gissur Þórhallsson")
+        facts = kg.query_entity("Gissur Þórhallsson", direction="both")
+        assert len(facts) == 3
+        preds = sorted(f["predicate"] for f in facts)
+        assert preds == ["evaluating", "interviewed", "works_at"]
+
+    def test_merge_self_is_noop(self, kg):
+        result = kg.merge_entities("Gissur", "Gissur")
+        assert result["success"] is True
+        assert result["triples_rewritten"] == 0
+        # Both rows still exist.
+        conn = kg._conn()
+        assert (
+            conn.execute(
+                "SELECT 1 FROM entities WHERE id = ?", (kg._entity_id("Gissur"),)
+            ).fetchone()
+            is not None
+        )
+
+    def test_missing_source_raises(self, kg):
+        with pytest.raises(ValueError, match="not found"):
+            kg.merge_entities("Nobody", "Gissur Þórhallsson")
+
+    def test_missing_target_is_created(self, kg):
+        result = kg.merge_entities("Gissur", "Gissur Thorhallsson (canonical)")
+        assert result["success"] is True
+        conn = kg._conn()
+        assert (
+            conn.execute(
+                "SELECT name FROM entities WHERE id = ?",
+                (kg._entity_id("Gissur Thorhallsson (canonical)"),),
+            ).fetchone()["name"]
+            == "Gissur Thorhallsson (canonical)"
+        )
+
+    def test_empty_names_rejected(self, kg):
+        with pytest.raises(ValueError):
+            kg.merge_entities("", "Gissur")
+        with pytest.raises(ValueError):
+            kg.merge_entities("Gissur", "")
+
+    def test_double_sided_triple_counted_once(self, tmp_path):
+        # Edge case: an entity that is both subject and object of one
+        # triple should only count once in ``triples_rewritten``.
+        kg = KnowledgeGraph(str(tmp_path / "self_loop.sqlite3"))
+        try:
+            kg.add_entity("Mirror")
+            kg.add_entity("Reflection")
+            kg.add_triple("Mirror", "is", "Mirror")  # self-loop
+            kg.add_triple("Mirror", "becomes", "Reflection")
+
+            result = kg.merge_entities("Mirror", "Reflection")
+            assert result["subject_rewrites"] == 2
+            assert result["object_rewrites"] == 1
+            # Self-loop touched both sides — count it once.
+            assert result["triples_rewritten"] == 2
+        finally:
+            kg.close()
