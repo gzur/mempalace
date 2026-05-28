@@ -222,6 +222,14 @@ def kg_timeline(request: Request) -> dict:
     return mcp_server.tool_kg_timeline(entity=entity)
 
 
+def kg_set_entity_type(request: Request, body: dict) -> dict:
+    """Update one entity's type. PATCH /api/v1/kg/entity/{name} {type}."""
+    return mcp_server.tool_kg_set_entity_type(
+        name=request.path_params.get("name", "") or "",
+        entity_type=str(body.get("type", "") or ""),
+    )
+
+
 def kg_merge(_request: Request, body: dict) -> dict:
     """Merge one KG entity into another. POST {from, into}."""
     return mcp_server.tool_kg_merge(
@@ -270,6 +278,11 @@ def routes() -> list[Route]:
         Route("/api/v1/kg/timeline", _wrap(kg_timeline), methods=["GET"]),
         Route("/api/v1/kg/graph", _wrap(kg_graph), methods=["GET"]),
         Route("/api/v1/kg/merge", _wrap_post(kg_merge), methods=["POST"]),
+        Route(
+            "/api/v1/kg/entity/{name:path}",
+            _wrap_post(kg_set_entity_type),
+            methods=["PATCH"],
+        ),
         Route("/api/v1/health", _wrap(health_endpoint), methods=["GET"]),
     ]
 

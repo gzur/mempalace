@@ -431,3 +431,39 @@ class TestMergeEntities:
             assert result["triples_rewritten"] == 2
         finally:
             kg.close()
+
+
+class TestSetEntityType:
+    """``set_entity_type`` mutates the ``type`` column in place. Most
+    entities land in the KG as 'unknown' (auto-created via add_triple),
+    and the user wants to relabel them after the fact."""
+
+    @pytest.fixture
+    def kg(self, tmp_path):
+        kg = KnowledgeGraph(str(tmp_path / "kg.sqlite3"))
+        kg.add_entity("RUV")  # default type=unknown
+        yield kg
+        kg.close()
+
+    def test_updates_type(self, kg):
+        result = kg.set_entity_type("RUV", "org")
+        assert result["success"] is True
+        assert result["type"] == "org"
+        assert result["previous_type"] == "unknown"
+
+        conn = kg._conn()
+        row = conn.execute(
+            "SELECT type FROM entities WHERE id = ?",
+            (kg._entity_id("RUV"),),
+        ).fetchone()
+        assert row["type"] == "org"
+
+    def test_missing_entity_raises(self, kg):
+        with pytest.raises(ValueError, match="not found"):
+            kg.set_entity_type("NoSuch", "person")
+
+    def test_empty_args_rejected(self, kg):
+        with pytest.raises(ValueError):
+            kg.set_entity_type("", "org")
+        with pytest.raises(ValueError):
+            kg.set_entity_type("RUV", "")

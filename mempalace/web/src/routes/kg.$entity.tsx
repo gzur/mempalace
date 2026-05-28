@@ -1,7 +1,12 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
-import { useKGEntity, useKGGraph, useKGMerge } from "@/api/queries";
+import {
+  useKGEntity,
+  useKGGraph,
+  useKGMerge,
+  useKGSetEntityType,
+} from "@/api/queries";
 import { Breadcrumbs } from "@/components/Breadcrumbs";
 import { KGGraph } from "@/components/KGGraph";
 import { cn } from "@/lib/cn";
@@ -9,6 +14,101 @@ import { cn } from "@/lib/cn";
 export const Route = createFileRoute("/kg/$entity")({
   component: EntityPage,
 });
+
+const COMMON_TYPES = [
+  "person",
+  "org",
+  "project",
+  "topic",
+  "place",
+  "activity",
+  "unknown",
+] as const;
+
+function TypeControl({
+  entity,
+  currentType,
+}: {
+  entity: string;
+  currentType: string;
+}) {
+  const setType = useKGSetEntityType();
+  const [draft, setDraft] = useState(currentType);
+  useEffect(() => {
+    setDraft(currentType);
+  }, [currentType]);
+
+  const datalistId = useMemo(
+    () => `entity-types-${entity.replace(/[^a-zA-Z0-9]/g, "")}`,
+    [entity],
+  );
+  const trimmed = draft.trim();
+  const canSubmit =
+    trimmed.length > 0 && trimmed !== currentType && !setType.isPending;
+
+  return (
+    <section className="rounded border border-[color:var(--color-border)] bg-[color:var(--color-surface)] p-3">
+      <h2 className="mb-2 text-[11px] uppercase tracking-wide text-[color:var(--color-muted)]">
+        type
+      </h2>
+      <p className="mb-2 text-[11px] text-[color:var(--color-muted)]">
+        Relabel this entity. Most auto-created entities default to
+        <code> unknown</code>; pick whatever convention fits (the suggestions
+        are a starting point, not a fixed list).
+      </p>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!canSubmit) return;
+          setType.mutate({ name: entity, type: trimmed });
+        }}
+        className="flex flex-wrap items-center gap-2 text-[12px]"
+      >
+        <span className="text-[color:var(--color-muted)]">current</span>
+        <code className="text-[color:var(--color-accent)]">{currentType}</code>
+        <span className="text-[color:var(--color-muted)]">→</span>
+        <input
+          list={datalistId}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          placeholder="new type"
+          className="flex-1 rounded border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 py-1 outline-none focus:border-[color:var(--color-accent)]"
+        />
+        <datalist id={datalistId}>
+          {COMMON_TYPES.map((t) => (
+            <option key={t} value={t} />
+          ))}
+        </datalist>
+        <button
+          type="submit"
+          disabled={!canSubmit}
+          className={cn(
+            "rounded border px-3 py-1",
+            canSubmit
+              ? "border-[color:var(--color-accent)] bg-[color:var(--color-accent)] text-[color:var(--color-accent-fg)]"
+              : "border-[color:var(--color-border)] text-[color:var(--color-muted)]",
+          )}
+        >
+          {setType.isPending ? "saving…" : "set type"}
+        </button>
+      </form>
+      {setType.data && (
+        <p
+          className={cn(
+            "mt-2 text-[12px]",
+            setType.data.success
+              ? "text-[color:var(--color-success)]"
+              : "text-[color:var(--color-danger)]",
+          )}
+        >
+          {setType.data.success
+            ? `was '${setType.data.previous_type}', now '${setType.data.type}'`
+            : (setType.data.error ?? "failed")}
+        </p>
+      )}
+    </section>
+  );
+}
 
 function MergeControl({
   entity,
@@ -166,6 +266,12 @@ function EntityPage() {
           }}
         />
       )}
+
+      {(() => {
+        const currentType =
+          fullGraph.data?.nodes.find((n) => n.name === entity)?.type ?? "unknown";
+        return <TypeControl entity={entity} currentType={currentType} />;
+      })()}
 
       <MergeControl
         entity={entity}

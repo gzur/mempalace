@@ -200,6 +200,39 @@ class TestKgMerge:
         assert r.json()["success"] is False
 
 
+class TestKgSetEntityType:
+    def test_patch_updates_entity_type(self, app_client, kg):
+        kg.add_entity("RUV")  # default type=unknown
+        # graph_dump only returns nodes touched by triples; give it one
+        # so the post-patch round-trip can see the type change.
+        kg.add_triple("RUV", "is_broadcaster", "Iceland")
+
+        r = app_client.patch(
+            "/api/v1/kg/entity/RUV",
+            json={"type": "org"},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["success"] is True
+        assert body["type"] == "org"
+        assert body["previous_type"] == "unknown"
+
+        dump = app_client.get("/api/v1/kg/graph").json()
+        ruv = next(n for n in dump["nodes"] if n["name"] == "RUV")
+        assert ruv["type"] == "org"
+
+    def test_patch_missing_entity_returns_error(self, app_client):
+        r = app_client.patch("/api/v1/kg/entity/NoSuch", json={"type": "org"})
+        assert r.status_code == 200
+        assert r.json()["success"] is False
+
+    def test_patch_missing_type_returns_error(self, app_client, kg):
+        kg.add_entity("RUV")
+        r = app_client.patch("/api/v1/kg/entity/RUV", json={})
+        assert r.status_code == 200
+        assert r.json()["success"] is False
+
+
 class TestHealthEndpoint:
     def test_returns_overall_and_checks(self, app_client):
         r = app_client.get("/api/v1/health")

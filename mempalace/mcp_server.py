@@ -1599,6 +1599,27 @@ def tool_kg_merge(from_name: str, into_name: str) -> dict:
     return result
 
 
+def tool_kg_set_entity_type(name: str, entity_type: str) -> dict:
+    """Set the ``type`` of an existing KG entity (person / org / etc.).
+
+    Entities created via ``kg_add`` default to ``unknown`` because the
+    add-triple path doesn't know what kind of thing the object string
+    refers to. Use this tool to relabel them after the fact.
+    """
+    try:
+        name = sanitize_kg_value(name, "name")
+        entity_type = sanitize_name(entity_type, "entity_type")
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+
+    _wal_log("kg_set_entity_type", {"name": name, "type": entity_type})
+
+    try:
+        return _call_kg(lambda kg: kg.set_entity_type(name, entity_type))
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+
+
 def tool_kg_timeline(entity: str = None):
     """Get chronological timeline of facts, optionally for one entity."""
     if entity is not None:
@@ -2066,6 +2087,21 @@ TOOLS = {
             },
         },
         "handler": tool_kg_timeline,
+    },
+    "mempalace_kg_set_entity_type": {
+        "description": "Relabel a KG entity's type (e.g. unknown → person / org / project / topic / place). Entities auto-created by kg_add default to 'unknown' — use this to fix them.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Entity name to update"},
+                "entity_type": {
+                    "type": "string",
+                    "description": "New type label (free-form; convention: person, org, project, topic, place, activity)",
+                },
+            },
+            "required": ["name", "entity_type"],
+        },
+        "handler": tool_kg_set_entity_type,
     },
     "mempalace_kg_merge": {
         "description": "Fold one entity into another. Rewrites every triple referencing 'from' to point at 'into', then deletes 'from'. Use to collapse alias duplicates (e.g. 'Gissur' + 'Gissur Þórhallsson' → one node). Auto-creates 'into' if missing, so this also serves as rename.",

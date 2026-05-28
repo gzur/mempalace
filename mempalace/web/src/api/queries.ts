@@ -192,3 +192,30 @@ export function useKGMerge() {
     },
   });
 }
+
+export interface KGSetEntityTypeResponse {
+  success: boolean;
+  name?: string;
+  type?: string;
+  previous_type?: string;
+  error?: string;
+}
+
+/** PATCH an existing entity's ``type``. Invalidates KG caches on success. */
+export function useKGSetEntityType() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { name: string; type: string }) =>
+      api<KGSetEntityTypeResponse>(
+        `/api/v1/kg/entity/${encodeURIComponent(vars.name)}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ type: vars.type }),
+        },
+      ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["kg"] });
+    },
+  });
+}

@@ -357,6 +357,38 @@ class KnowledgeGraph:
                     (ended, sub_id, pred, obj_id),
                 )
 
+    def set_entity_type(self, name: str, entity_type: str) -> dict:
+        """Update an existing entity's ``type`` (person / org / topic / …).
+
+        Returns ``{success, name, type, previous_type}``. Raises
+        ``ValueError`` if the entity does not exist (use ``add_entity`` to
+        create one with a type).
+        """
+        if not name or not name.strip():
+            raise ValueError("name is required")
+        if not entity_type or not entity_type.strip():
+            raise ValueError("entity_type is required")
+        eid = self._entity_id(name)
+        with self._lock:
+            conn = self._conn()
+            row = conn.execute(
+                "SELECT type FROM entities WHERE id = ?", (eid,)
+            ).fetchone()
+            if not row:
+                raise ValueError(f"entity {name!r} not found")
+            previous = row["type"]
+            with conn:
+                conn.execute(
+                    "UPDATE entities SET type = ? WHERE id = ?",
+                    (entity_type, eid),
+                )
+        return {
+            "success": True,
+            "name": name,
+            "type": entity_type,
+            "previous_type": previous,
+        }
+
     # ── Merge ─────────────────────────────────────────────────────────────
 
     def merge_entities(self, from_name: str, into_name: str) -> dict:
