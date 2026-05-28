@@ -156,6 +156,10 @@ function EntityPage() {
           graph={neighborhood}
           highlightName={entity}
           height={420}
+          // Neighborhoods are small by construction — labelling all of
+          // them is the most useful default here, even when the main
+          // /app/kg view is on ``auto``.
+          labelsMode="all"
           onNodeClick={(_id, name) => {
             if (name === entity) return;
             window.location.assign(`/app/kg/${encodeURIComponent(name)}`);

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import ForceGraph2D, { type ForceGraphMethods } from "react-force-graph-2d";
 
 import type { KGGraphResponse } from "@/api/types";
@@ -24,10 +24,14 @@ interface Node {
 }
 
 interface Link {
-  source: string;
-  target: string;
+  source: string | { id: string };
+  target: string | { id: string };
   predicate: string;
 }
+
+/** ``auto`` = density-based heuristic; ``all`` = always show; ``off`` = only
+ *  the hovered node's label. Applies to both node and edge labels. */
+export type LabelsMode = "auto" | "all" | "off";
 
 interface Props {
   graph: KGGraphResponse;
@@ -36,6 +40,7 @@ interface Props {
   /** CSS palette per entity type. Falls back to a deterministic colour. */
   typePalette?: Record<string, string>;
   height?: number;
+  labelsMode?: LabelsMode;
 }
 
 const FALLBACK_PALETTE = [
@@ -49,9 +54,18 @@ const FALLBACK_PALETTE = [
   "#a5d6ff",
 ];
 
-export function KGGraph({ graph, onNodeClick, highlightName, typePalette, height = 600 }: Props) {
+export function KGGraph({
+  graph,
+  onNodeClick,
+  highlightName,
+  typePalette,
+  height = 600,
+  labelsMode = "auto",
+}: Props) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const fgRef = useRef<ForceGraphMethods<any, any> | undefined>(undefined);
+  const [hovered, setHovered] = useState<Node | null>(null);
+  const [hoveredLink, setHoveredLink] = useState<Link | null>(null);
 
   const data = useMemo(() => {
     const lowerHighlight = highlightName?.toLowerCase().trim();
@@ -92,8 +106,25 @@ export function KGGraph({ graph, onNodeClick, highlightName, typePalette, height
     return () => clearTimeout(id);
   }, [graph]);
 
+  const shouldShowNodeLabel = (node: Node, scale: number) => {
+    if (labelsMode === "off") return false;
+    if (labelsMode === "all") return true;
+    return scale > 1.6 || node.degree > 6 || !!node.isHighlighted;
+  };
+
+  const shouldShowEdgeLabel = (scale: number) => {
+    if (labelsMode === "off") return false;
+    if (labelsMode === "all") return true;
+    // ``auto`` for edges: only at high zoom where they won't blanket the
+    // whole canvas with overlapping predicate text.
+    return scale > 2.4;
+  };
+
   return (
-    <div style={{ height }} className="overflow-hidden rounded border border-[color:var(--color-border)] bg-[color:var(--color-bg)]">
+    <div
+      style={{ height }}
+      className="relative overflow-hidden rounded border border-[color:var(--color-border)] bg-[color:var(--color-bg)]"
+    >
       <ForceGraph2D
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         ref={fgRef as any}
@@ -113,33 +144,87 @@ export function KGGraph({ graph, onNodeClick, highlightName, typePalette, height
           const r = Math.max(2, Math.log2(node.degree + 1) * 1.5);
           ctx.beginPath();
           ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
-          ctx.fillStyle = node.isHighlighted
-            ? "#ffd60a"
-            : colorFor(node.type);
+          ctx.fillStyle = node.isHighlighted ? "#ffd60a" : colorFor(node.type);
           ctx.fill();
           if (node.isHighlighted) {
             ctx.lineWidth = 2 / scale;
             ctx.strokeStyle = "#fff";
             ctx.stroke();
           }
-          if (scale > 1.6 || node.degree > 6 || node.isHighlighted) {
+          if (shouldShowNodeLabel(node, scale)) {
+            const fontSize = Math.max(8, 10 / scale);
             ctx.fillStyle = "#c9d1d9";
-            ctx.font = `${10 / scale}px ui-monospace, SFMono-Regular, Menlo, monospace`;
+            ctx.font = `${fontSize}px ui-monospace, SFMono-Regular, Menlo, monospace`;
             ctx.textAlign = "center";
             ctx.textBaseline = "top";
             ctx.fillText(node.name, node.x, node.y + r + 1 / scale);
           }
         }}
-        nodeLabel={(n) =>
-          `${(n as Node).name} · ${(n as Node).type} · deg ${(n as Node).degree}`
-        }
-        linkLabel={(l) => (l as Link).predicate}
+        linkCanvasObjectMode={() => "after"}
+        linkCanvasObject={(rawLink, ctx, scale) => {
+          if (!shouldShowEdgeLabel(scale)) return;
+          const link = rawLink as Link & {
+            source: { x?: number; y?: number };
+            target: { x?: number; y?: number };
+          };
+          const sx = link.source.x;
+          const sy = link.source.y;
+          const tx = link.target.x;
+          const ty = link.target.y;
+          if (sx === undefined || sy === undefined || tx === undefined || ty === undefined) {
+            return;
+          }
+          const mx = (sx + tx) / 2;
+          const my = (sy + ty) / 2;
+          const fontSize = Math.max(7, 8 / scale);
+          ctx.font = `${fontSize}px ui-monospace, SFMono-Regular, Menlo, monospace`;
+          const label = link.predicate;
+          const padding = 2 / scale;
+          const w = ctx.measureText(label).width + padding * 2;
+          const h = fontSize + padding * 2;
+          ctx.fillStyle = "rgba(13, 17, 23, 0.85)";
+          ctx.fillRect(mx - w / 2, my - h / 2, w, h);
+          ctx.fillStyle = "#8b949e";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(label, mx, my);
+        }}
+        onNodeHover={(n) => setHovered((n as Node | null) ?? null)}
+        onLinkHover={(l) => setHoveredLink((l as Link | null) ?? null)}
         onNodeClick={(n) => {
           const node = n as Node;
           onNodeClick?.(node.id, node.name);
         }}
         enableNodeDrag={false}
       />
+      {(hovered || hoveredLink) && (
+        <div className="pointer-events-none absolute top-2 right-2 max-w-[60%] rounded border border-[color:var(--color-border)] bg-[color:var(--color-surface)] px-3 py-2 text-[11px] shadow-lg">
+          {hovered && (
+            <div className="flex flex-col gap-0.5">
+              <div className="font-semibold text-[color:var(--color-fg)]">
+                {hovered.name}
+              </div>
+              <div className="text-[color:var(--color-muted)]">
+                <span className="text-[color:var(--color-accent)]">
+                  {hovered.type || "unknown"}
+                </span>
+                <span> · deg {hovered.degree}</span>
+              </div>
+              <div className="text-[10px] text-[color:var(--color-muted)]">
+                click to open
+              </div>
+            </div>
+          )}
+          {!hovered && hoveredLink && (
+            <div className="flex flex-col gap-0.5">
+              <div className="text-[color:var(--color-muted)]">edge</div>
+              <code className="text-[color:var(--color-accent)]">
+                {hoveredLink.predicate}
+              </code>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

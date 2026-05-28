@@ -8,10 +8,18 @@ import { StatCard } from "@/components/StatCard";
 import { cn } from "@/lib/cn";
 import { formatInt } from "@/lib/format";
 
+type LabelsMode = "auto" | "all" | "off";
+
 interface Search {
   q?: string;
   includeExpired?: boolean;
   maxNodes?: number;
+  labels?: LabelsMode;
+}
+
+function parseLabels(v: unknown): LabelsMode {
+  if (v === "all" || v === "off" || v === "auto") return v;
+  return "auto";
 }
 
 export const Route = createFileRoute("/kg/")({
@@ -28,6 +36,7 @@ export const Route = createFileRoute("/kg/")({
         : typeof s.maxNodes === "string"
           ? parseInt(s.maxNodes, 10) || undefined
           : undefined,
+    labels: parseLabels(s.labels),
   }),
 });
 
@@ -46,6 +55,7 @@ function KGPage() {
   const navigate = useNavigate({ from: "/kg/" });
   const includeExpired = search.includeExpired ?? false;
   const maxNodes = search.maxNodes;
+  const labels: LabelsMode = search.labels ?? "auto";
 
   const stats = useKGStats();
   const graph = useKGGraph(includeExpired, maxNodes);
@@ -99,6 +109,22 @@ function KGPage() {
               {n ? `top ${n}` : "full"}
             </button>
           ))}
+          <span className="ml-2 text-[color:var(--color-muted)]">labels</span>
+          {(["auto", "all", "off"] as const).map((m) => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => navigate({ search: { ...search, labels: m } })}
+              className={cn(
+                "rounded border px-2 py-0.5",
+                m === labels
+                  ? "border-[color:var(--color-accent)] text-[color:var(--color-accent)]"
+                  : "border-[color:var(--color-border)] text-[color:var(--color-muted)] hover:border-[color:var(--color-fg)]",
+              )}
+            >
+              {m}
+            </button>
+          ))}
         </div>
       </header>
 
@@ -144,6 +170,7 @@ function KGPage() {
             graph={graph.data}
             highlightName={search.q}
             typePalette={TYPE_PALETTE}
+            labelsMode={labels}
             onNodeClick={(_id, name) =>
               navigate({
                 to: "/kg/$entity",
