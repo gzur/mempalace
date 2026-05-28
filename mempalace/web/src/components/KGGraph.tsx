@@ -152,7 +152,10 @@ export function KGGraph({
             ctx.stroke();
           }
           if (shouldShowNodeLabel(node, scale)) {
-            const fontSize = Math.max(8, 10 / scale);
+            // Font size in world units = 10 / scale → constant ~10px on
+            // screen at any zoom. Clamping (Math.max) here would peg the
+            // value in world units and make labels GROW with zoom.
+            const fontSize = 10 / scale;
             ctx.fillStyle = "#c9d1d9";
             ctx.font = `${fontSize}px ui-monospace, SFMono-Regular, Menlo, monospace`;
             ctx.textAlign = "center";
@@ -176,7 +179,9 @@ export function KGGraph({
           }
           const mx = (sx + tx) / 2;
           const my = (sy + ty) / 2;
-          const fontSize = Math.max(7, 8 / scale);
+          // Constant ~8px screen size regardless of zoom (no Math.max clamp,
+          // which would force world-unit size and grow with zoom).
+          const fontSize = 8 / scale;
           ctx.font = `${fontSize}px ui-monospace, SFMono-Regular, Menlo, monospace`;
           const label = link.predicate;
           const padding = 2 / scale;
