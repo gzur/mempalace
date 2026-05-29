@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import {
   useKGAdd,
+  useKGDeleteTriple,
   useKGEntity,
   useKGGraph,
   useKGMerge,
@@ -401,6 +402,7 @@ function EntityPage() {
   // TanStack Query.
   const fullGraph = useKGGraph(false);
   const stats = useKGStats();
+  const deleteTriple = useKGDeleteTriple();
 
   const neighborhood = (() => {
     const data = fullGraph.data;
@@ -507,7 +509,7 @@ function EntityPage() {
               <ul className="flex flex-col gap-1">
                 {entityFacts.map((f, i) => (
                   <li
-                    key={`${f.predicate}-${f.subject}-${f.object}-${i}`}
+                    key={f.id ?? `${f.predicate}-${f.subject}-${f.object}-${i}`}
                     className={cn(
                       "flex flex-wrap items-baseline gap-2 rounded border px-3 py-1.5 text-[12px]",
                       f.current === false
@@ -535,6 +537,25 @@ function EntityPage() {
                     <span className="ml-auto text-[color:var(--color-muted)]">
                       {f.valid_from ?? "?"} → {f.valid_to ?? "now"}
                     </span>
+                    {f.id && (
+                      <button
+                        type="button"
+                        title="delete this fact"
+                        disabled={deleteTriple.isPending}
+                        onClick={() => {
+                          if (
+                            window.confirm(
+                              `Delete this fact?\n\n${f.subject} → ${f.predicate} → ${f.object}`,
+                            )
+                          ) {
+                            deleteTriple.mutate(f.id!);
+                          }
+                        }}
+                        className="rounded border border-[color:var(--color-border)] px-1.5 py-0 text-[10px] text-[color:var(--color-muted)] hover:border-[color:var(--color-danger)] hover:text-[color:var(--color-danger)]"
+                      >
+                        ×
+                      </button>
+                    )}
                   </li>
                 ))}
               </ul>
@@ -553,7 +574,7 @@ function EntityPage() {
                 <ul className="flex flex-col gap-1">
                   {textFacts.map((f, i) => (
                     <li
-                      key={`text-${f.predicate}-${i}`}
+                      key={f.id ?? `text-${f.predicate}-${i}`}
                       className={cn(
                         "rounded border border-[color:var(--color-border)] bg-[color:var(--color-surface)] px-3 py-1.5 text-[12px]",
                         f.current === false &&
@@ -564,8 +585,33 @@ function EntityPage() {
                         <code className="text-[color:var(--color-accent)]">
                           {f.predicate}
                         </code>
-                        <span className="text-[color:var(--color-muted)]">
-                          {f.valid_from ?? "?"} → {f.valid_to ?? "now"}
+                        <span className="flex items-center gap-2">
+                          <span className="text-[color:var(--color-muted)]">
+                            {f.valid_from ?? "?"} → {f.valid_to ?? "now"}
+                          </span>
+                          {f.id && (
+                            <button
+                              type="button"
+                              title="delete this property"
+                              disabled={deleteTriple.isPending}
+                              onClick={() => {
+                                const preview =
+                                  f.object.length > 80
+                                    ? f.object.slice(0, 80) + "…"
+                                    : f.object;
+                                if (
+                                  window.confirm(
+                                    `Delete this property?\n\n${f.predicate}: ${preview}`,
+                                  )
+                                ) {
+                                  deleteTriple.mutate(f.id!);
+                                }
+                              }}
+                              className="rounded border border-[color:var(--color-border)] px-1.5 py-0 text-[10px] text-[color:var(--color-muted)] hover:border-[color:var(--color-danger)] hover:text-[color:var(--color-danger)]"
+                            >
+                              ×
+                            </button>
+                          )}
                         </span>
                       </div>
                       <p className="mt-1 whitespace-pre-wrap break-words">

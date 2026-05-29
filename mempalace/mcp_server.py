@@ -1654,6 +1654,28 @@ def tool_kg_set_entity_type(name: str, entity_type: str) -> dict:
         return {"success": False, "error": str(e)}
 
 
+def tool_kg_delete_triple(triple_id: str) -> dict:
+    """Hard-delete a single triple by id.
+
+    Use this to remove a wrong fact entirely. For temporal invalidation
+    (keep the historical row, just mark it no-longer-true) use
+    ``kg_invalidate`` instead.
+
+    Returns ``{success, deleted, triple_id, fact?}``. ``deleted`` is
+    False when the id doesn't exist — that's not an error, just
+    "nothing to do" (the row may have been removed already).
+    """
+    if not triple_id or not str(triple_id).strip():
+        return {"success": False, "error": "triple_id is required"}
+
+    _wal_log("kg_delete_triple", {"triple_id": triple_id})
+
+    try:
+        return _call_kg(lambda kg: kg.delete_triple(str(triple_id).strip()))
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+
+
 def tool_kg_timeline(entity: str = None):
     """Get chronological timeline of facts, optionally for one entity."""
     if entity is not None:
@@ -2140,6 +2162,20 @@ TOOLS = {
             "required": ["name", "entity_type"],
         },
         "handler": tool_kg_set_entity_type,
+    },
+    "mempalace_kg_delete_triple": {
+        "description": "Hard-delete a triple by id. Use to remove a wrong/legacy fact entirely. For temporal invalidation (mark no-longer-true while keeping history) use mempalace_kg_invalidate instead. Returns deleted=False (not an error) when the id is gone.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "triple_id": {
+                    "type": "string",
+                    "description": "Triple id to remove. Get one from kg_query's facts list ('id' field).",
+                },
+            },
+            "required": ["triple_id"],
+        },
+        "handler": tool_kg_delete_triple,
     },
     "mempalace_kg_merge": {
         "description": "Fold one entity into another. Rewrites every triple referencing 'from' to point at 'into', then deletes 'from'. Use to collapse alias duplicates (e.g. 'Gissur' + 'Gissur Þórhallsson' → one node). Auto-creates 'into' if missing, so this also serves as rename.",

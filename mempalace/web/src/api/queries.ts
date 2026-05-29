@@ -208,6 +208,29 @@ export interface KGAddTripleResponse {
   error?: string;
 }
 
+export interface KGDeleteTripleResponse {
+  success: boolean;
+  deleted?: boolean;
+  triple_id?: string;
+  fact?: string;
+  error?: string;
+}
+
+/** Hard-delete a triple by id. Invalidates KG caches on success. */
+export function useKGDeleteTriple() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (tripleId: string) =>
+      api<KGDeleteTripleResponse>(
+        `/api/v1/kg/triples/${encodeURIComponent(tripleId)}`,
+        { method: "DELETE" },
+      ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["kg"] });
+    },
+  });
+}
+
 /** Add a new triple to the KG. Invalidates KG caches on success. */
 export function useKGAdd() {
   const qc = useQueryClient();

@@ -308,6 +308,32 @@ class TestKgAddTriple:
         assert "freelance" in status_fact["object"]
 
 
+class TestKgDeleteTriple:
+    def test_delete_drops_the_triple(self, app_client, kg):
+        kg.add_entity("Emile", entity_type="person")
+        kg.add_entity("RUV", entity_type="org")
+        tid = kg.add_triple("Emile", "works_at", "RUV")
+
+        r = app_client.delete(f"/api/v1/kg/triples/{tid}")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["success"] is True
+        assert body["deleted"] is True
+
+        # /api/v1/kg/entity?name=Emile now returns zero outgoing facts.
+        q = app_client.get(
+            "/api/v1/kg/entity", params={"name": "Emile", "direction": "outgoing"}
+        ).json()
+        assert q["count"] == 0
+
+    def test_delete_missing_id_is_soft_miss(self, app_client):
+        r = app_client.delete("/api/v1/kg/triples/t_doesnt_exist")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["success"] is True
+        assert body["deleted"] is False
+
+
 class TestKgSetEntityType:
     def test_patch_updates_entity_type(self, app_client, kg):
         kg.add_entity("RUV")  # default type=unknown

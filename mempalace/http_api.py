@@ -259,6 +259,14 @@ def kg_add_triple(_request: Request, body: dict) -> dict:
     )
 
 
+def kg_delete_triple(request: Request) -> dict:
+    """Hard-delete a triple by id.
+    DELETE /api/v1/kg/triples/{triple_id}."""
+    return mcp_server.tool_kg_delete_triple(
+        triple_id=request.path_params.get("triple_id", "") or "",
+    )
+
+
 def kg_merge(_request: Request, body: dict) -> dict:
     """Merge one KG entity into another. POST {from, into}."""
     return mcp_server.tool_kg_merge(
@@ -308,6 +316,11 @@ def routes() -> list[Route]:
         Route("/api/v1/kg/graph", _wrap(kg_graph), methods=["GET"]),
         Route("/api/v1/kg/merge", _wrap_post(kg_merge), methods=["POST"]),
         Route("/api/v1/kg/triples", _wrap_post(kg_add_triple), methods=["POST"]),
+        Route(
+            "/api/v1/kg/triples/{triple_id:path}",
+            _wrap(kg_delete_triple),
+            methods=["DELETE"],
+        ),
         Route(
             "/api/v1/kg/entity/{name:path}",
             _wrap_post(kg_set_entity_type),

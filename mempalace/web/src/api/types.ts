@@ -118,6 +118,8 @@ export interface KGStats {
 }
 
 export interface KGFact {
+  /** Triple id, populated by query_entity. Required to call delete_triple. */
+  id?: string;
   subject: string;
   predicate: string;
   object: string;

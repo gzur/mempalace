@@ -666,6 +666,63 @@ class TestPrunePhraseEntities:
             kg.close()
 
 
+class TestDeleteTriple:
+    @pytest.fixture
+    def kg(self, tmp_path):
+        kg = KnowledgeGraph(str(tmp_path / "kg.sqlite3"))
+        kg.add_entity("Emile", entity_type="person")
+        kg.add_entity("RUV", entity_type="org")
+        yield kg
+        kg.close()
+
+    def test_delete_by_id_drops_the_row(self, kg):
+        tid = kg.add_triple("Emile", "works_at", "RUV")
+        result = kg.delete_triple(tid)
+        assert result["success"] is True
+        assert result["deleted"] is True
+        assert result["fact"] == "Emile → works_at → RUV"
+
+        rows = kg._conn().execute("SELECT COUNT(*) AS c FROM triples").fetchone()
+        assert rows["c"] == 0
+
+    def test_delete_missing_id_is_a_soft_miss(self, kg):
+        # Already-deleted / never-existed → success=True, deleted=False.
+        result = kg.delete_triple("t_doesnt_exist")
+        assert result["success"] is True
+        assert result["deleted"] is False
+        assert "fact" not in result
+
+    def test_delete_leaves_entities_intact(self, kg):
+        tid = kg.add_triple("Emile", "works_at", "RUV")
+        kg.delete_triple(tid)
+        names = {
+            r["name"]
+            for r in kg._conn().execute("SELECT name FROM entities").fetchall()
+        }
+        assert names == {"Emile", "RUV"}
+
+    def test_delete_text_valued_triple(self, kg):
+        tid = kg.add_triple(
+            "Emile",
+            "status",
+            "x",
+            value_text="currently between roles",
+        )
+        result = kg.delete_triple(tid)
+        assert result["deleted"] is True
+        # Fact format uses value_text when the object is text.
+        assert "currently between roles" in result["fact"]
+
+    def test_query_entity_includes_triple_id(self, kg):
+        tid = kg.add_triple("Emile", "works_at", "RUV")
+        facts = kg.query_entity("Emile", direction="both")
+        assert any(f.get("id") == tid for f in facts)
+
+    def test_empty_id_rejected(self, kg):
+        with pytest.raises(ValueError):
+            kg.delete_triple("")
+
+
 class TestSearchEntities:
     @pytest.fixture
     def kg(self, tmp_path):

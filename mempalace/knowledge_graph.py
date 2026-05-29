@@ -555,6 +555,43 @@ class KnowledgeGraph:
             for r in rows
         ]
 
+    def delete_triple(self, triple_id: str) -> dict:
+        """Hard-delete one triple by id. Returns ``{success, deleted: bool,
+        triple_id, fact?}``. ``deleted`` is False (without raising) when
+        no such id exists — surfacing that to the caller is more useful
+        than an exception for "user clicked × on a triple that's
+        already gone".
+
+        For temporal invalidation (mark a fact as no-longer-true while
+        keeping the row for history) use ``invalidate`` instead.
+        """
+        if not triple_id or not triple_id.strip():
+            raise ValueError("triple_id is required")
+        with self._lock:
+            conn = self._conn()
+            row = conn.execute(
+                """
+                SELECT t.id, t.predicate,
+                       s.name AS sub_name,
+                       COALESCE(o.name, t.value_text) AS obj_name
+                FROM triples t
+                JOIN entities s ON t.subject = s.id
+                LEFT JOIN entities o ON t.object = o.id
+                WHERE t.id = ?
+                """,
+                (triple_id,),
+            ).fetchone()
+            if not row:
+                return {"success": True, "deleted": False, "triple_id": triple_id}
+            with conn:
+                conn.execute("DELETE FROM triples WHERE id = ?", (triple_id,))
+        return {
+            "success": True,
+            "deleted": True,
+            "triple_id": triple_id,
+            "fact": f"{row['sub_name']} → {row['predicate']} → {row['obj_name']}",
+        }
+
     def set_entity_type(self, name: str, entity_type: str) -> dict:
         """Update an existing entity's ``type`` (person / org / topic / …).
 
@@ -710,6 +747,7 @@ class KnowledgeGraph:
                 for row in conn.execute(query, params).fetchall():
                     results.append(
                         {
+                            "id": row["id"],
                             "direction": "outgoing",
                             "subject": name,
                             "predicate": row["predicate"],
@@ -737,6 +775,7 @@ class KnowledgeGraph:
                 for row in conn.execute(query, params).fetchall():
                     results.append(
                         {
+                            "id": row["id"],
                             "direction": "incoming",
                             "subject": row["sub_name"],
                             "predicate": row["predicate"],
