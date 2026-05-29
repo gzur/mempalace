@@ -534,6 +534,14 @@ def _bm25_only_via_sqlite(
             }
 
         placeholders = ",".join(["?"] * len(candidate_ids))
+        # Pull the public embedding_id (drawer_id) alongside metadata so
+        # bm25-sqlite hits carry the same identifier that the chromadb
+        # path emits. Without this, the SPA had no clickable link target.
+        id_rows = conn.execute(
+            f"SELECT id, embedding_id FROM embeddings WHERE id IN ({placeholders})",
+            candidate_ids,
+        ).fetchall()
+        drawer_id_by_emb = {row[0]: row[1] for row in id_rows}
         meta_rows = conn.execute(
             f"""
             SELECT id, key, string_value, int_value
@@ -566,6 +574,7 @@ def _bm25_only_via_sqlite(
         full_source = meta.get("source_file", "") or ""
         candidates.append(
             {
+                "drawer_id": drawer_id_by_emb.get(d["_id"], ""),
                 "text": d["text"],
                 "wing": meta.get("wing", "unknown"),
                 "room": meta.get("room", "unknown"),
@@ -895,7 +904,8 @@ def search_memories(
     CLOSET_DISTANCE_CAP = 1.5  # cosine dist > 1.5 = too weak to use as signal
 
     scored: list = []
-    for doc, meta, dist in zip(
+    for drawer_id, doc, meta, dist in zip(
+        _first_or_empty(drawer_results, "ids"),
         _first_or_empty(drawer_results, "documents"),
         _first_or_empty(drawer_results, "metadatas"),
         _first_or_empty(drawer_results, "distances"),
@@ -925,6 +935,7 @@ def search_memories(
         # inverting the ranking so the best hybrid matches sort last.
         effective_dist = max(0.0, min(2.0, dist - boost))
         entry = {
+            "drawer_id": drawer_id,
             "text": doc,
             "wing": meta.get("wing", "unknown"),
             "room": meta.get("room", "unknown"),
