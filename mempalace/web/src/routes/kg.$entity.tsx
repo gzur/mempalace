@@ -487,142 +487,145 @@ function EntityPage() {
                   navigate({ to: "/kg/$entity", params: { entity: into } });
                 }}
               />
+
+              {facts.data?.error && (
+                <p className="text-[color:var(--color-warn)]">
+                  {facts.data.error}
+                </p>
+              )}
+
+              {(() => {
+                const all = facts.data?.facts ?? [];
+                const entityFacts = all.filter(
+                  (f) => f.object_kind !== "text",
+                );
+                const textFacts = all.filter((f) => f.object_kind === "text");
+                return (
+                  <>
+                    <section>
+                      <h2 className="mb-2 text-[11px] uppercase tracking-wide text-[color:var(--color-muted)]">
+                        facts ({entityFacts.length})
+                      </h2>
+                      <ul className="flex flex-col gap-1">
+                        {entityFacts.map((f, i) => (
+                          <li
+                            key={
+                              f.id ??
+                              `${f.predicate}-${f.subject}-${f.object}-${i}`
+                            }
+                            className={cn(
+                              "flex flex-wrap items-baseline gap-2 rounded border px-3 py-1.5 text-[12px]",
+                              f.current === false
+                                ? "border-[color:var(--color-border)] bg-[color:var(--color-surface)] text-[color:var(--color-muted)]"
+                                : "border-[color:var(--color-border)] bg-[color:var(--color-surface)]",
+                            )}
+                          >
+                            <Link
+                              to="/kg/$entity"
+                              params={{ entity: f.subject }}
+                              className="font-semibold hover:underline"
+                            >
+                              {f.subject}
+                            </Link>
+                            <code className="text-[color:var(--color-accent)]">
+                              {f.predicate}
+                            </code>
+                            <Link
+                              to="/kg/$entity"
+                              params={{ entity: f.object }}
+                              className="font-semibold hover:underline"
+                            >
+                              {f.object}
+                            </Link>
+                            <span className="ml-auto text-[color:var(--color-muted)]">
+                              {f.valid_from ?? "?"} → {f.valid_to ?? "now"}
+                            </span>
+                            {f.id && (
+                              <button
+                                type="button"
+                                title="delete this fact"
+                                disabled={deleteTriple.isPending}
+                                onClick={() => {
+                                  if (
+                                    window.confirm(
+                                      `Delete this fact?\n\n${f.subject} → ${f.predicate} → ${f.object}`,
+                                    )
+                                  ) {
+                                    deleteTriple.mutate(f.id!);
+                                  }
+                                }}
+                                className="rounded border border-[color:var(--color-border)] px-1.5 py-0 text-[10px] text-[color:var(--color-muted)] hover:border-[color:var(--color-danger)] hover:text-[color:var(--color-danger)]"
+                              >
+                                ×
+                              </button>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    </section>
+
+                    {textFacts.length > 0 && (
+                      <section>
+                        <h2 className="mb-2 text-[11px] uppercase tracking-wide text-[color:var(--color-muted)]">
+                          properties ({textFacts.length})
+                        </h2>
+                        <ul className="flex flex-col gap-1">
+                          {textFacts.map((f, i) => (
+                            <li
+                              key={f.id ?? `text-${f.predicate}-${i}`}
+                              className={cn(
+                                "rounded border border-[color:var(--color-border)] bg-[color:var(--color-surface)] px-3 py-1.5 text-[12px]",
+                                f.current === false &&
+                                  "text-[color:var(--color-muted)]",
+                              )}
+                            >
+                              <div className="flex items-baseline justify-between gap-2">
+                                <code className="text-[color:var(--color-accent)]">
+                                  {f.predicate}
+                                </code>
+                                <span className="flex items-center gap-2">
+                                  <span className="text-[color:var(--color-muted)]">
+                                    {f.valid_from ?? "?"} →{" "}
+                                    {f.valid_to ?? "now"}
+                                  </span>
+                                  {f.id && (
+                                    <button
+                                      type="button"
+                                      title="delete this property"
+                                      disabled={deleteTriple.isPending}
+                                      onClick={() => {
+                                        const preview =
+                                          f.object.length > 80
+                                            ? f.object.slice(0, 80) + "…"
+                                            : f.object;
+                                        if (
+                                          window.confirm(
+                                            `Delete this property?\n\n${f.predicate}: ${preview}`,
+                                          )
+                                        ) {
+                                          deleteTriple.mutate(f.id!);
+                                        }
+                                      }}
+                                      className="rounded border border-[color:var(--color-border)] px-1.5 py-0 text-[10px] text-[color:var(--color-muted)] hover:border-[color:var(--color-danger)] hover:text-[color:var(--color-danger)]"
+                                    >
+                                      ×
+                                    </button>
+                                  )}
+                                </span>
+                              </div>
+                              <p className="mt-1 whitespace-pre-wrap break-words">
+                                {f.object}
+                              </p>
+                            </li>
+                          ))}
+                        </ul>
+                      </section>
+                    )}
+                  </>
+                );
+              })()}
             </div>
           </div>
-        );
-      })()}
-
-      {facts.data?.error && (
-        <p className="text-[color:var(--color-warn)]">{facts.data.error}</p>
-      )}
-
-      {(() => {
-        const all = facts.data?.facts ?? [];
-        const entityFacts = all.filter((f) => f.object_kind !== "text");
-        const textFacts = all.filter((f) => f.object_kind === "text");
-        return (
-          <>
-            <section>
-              <h2 className="mb-2 text-[11px] uppercase tracking-wide text-[color:var(--color-muted)]">
-                facts ({entityFacts.length})
-              </h2>
-              <ul className="flex flex-col gap-1">
-                {entityFacts.map((f, i) => (
-                  <li
-                    key={f.id ?? `${f.predicate}-${f.subject}-${f.object}-${i}`}
-                    className={cn(
-                      "flex flex-wrap items-baseline gap-2 rounded border px-3 py-1.5 text-[12px]",
-                      f.current === false
-                        ? "border-[color:var(--color-border)] bg-[color:var(--color-surface)] text-[color:var(--color-muted)]"
-                        : "border-[color:var(--color-border)] bg-[color:var(--color-surface)]",
-                    )}
-                  >
-                    <Link
-                      to="/kg/$entity"
-                      params={{ entity: f.subject }}
-                      className="font-semibold hover:underline"
-                    >
-                      {f.subject}
-                    </Link>
-                    <code className="text-[color:var(--color-accent)]">
-                      {f.predicate}
-                    </code>
-                    <Link
-                      to="/kg/$entity"
-                      params={{ entity: f.object }}
-                      className="font-semibold hover:underline"
-                    >
-                      {f.object}
-                    </Link>
-                    <span className="ml-auto text-[color:var(--color-muted)]">
-                      {f.valid_from ?? "?"} → {f.valid_to ?? "now"}
-                    </span>
-                    {f.id && (
-                      <button
-                        type="button"
-                        title="delete this fact"
-                        disabled={deleteTriple.isPending}
-                        onClick={() => {
-                          if (
-                            window.confirm(
-                              `Delete this fact?\n\n${f.subject} → ${f.predicate} → ${f.object}`,
-                            )
-                          ) {
-                            deleteTriple.mutate(f.id!);
-                          }
-                        }}
-                        className="rounded border border-[color:var(--color-border)] px-1.5 py-0 text-[10px] text-[color:var(--color-muted)] hover:border-[color:var(--color-danger)] hover:text-[color:var(--color-danger)]"
-                      >
-                        ×
-                      </button>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            </section>
-
-            {textFacts.length > 0 && (
-              <section>
-                <h2 className="mb-2 text-[11px] uppercase tracking-wide text-[color:var(--color-muted)]">
-                  properties ({textFacts.length})
-                </h2>
-                <p className="mb-2 text-[11px] text-[color:var(--color-muted)]">
-                  Inline descriptive values — these don't appear in the
-                  graph view since they're properties of this entity
-                  rather than edges to other entities.
-                </p>
-                <ul className="flex flex-col gap-1">
-                  {textFacts.map((f, i) => (
-                    <li
-                      key={f.id ?? `text-${f.predicate}-${i}`}
-                      className={cn(
-                        "rounded border border-[color:var(--color-border)] bg-[color:var(--color-surface)] px-3 py-1.5 text-[12px]",
-                        f.current === false &&
-                          "text-[color:var(--color-muted)]",
-                      )}
-                    >
-                      <div className="flex items-baseline justify-between gap-2">
-                        <code className="text-[color:var(--color-accent)]">
-                          {f.predicate}
-                        </code>
-                        <span className="flex items-center gap-2">
-                          <span className="text-[color:var(--color-muted)]">
-                            {f.valid_from ?? "?"} → {f.valid_to ?? "now"}
-                          </span>
-                          {f.id && (
-                            <button
-                              type="button"
-                              title="delete this property"
-                              disabled={deleteTriple.isPending}
-                              onClick={() => {
-                                const preview =
-                                  f.object.length > 80
-                                    ? f.object.slice(0, 80) + "…"
-                                    : f.object;
-                                if (
-                                  window.confirm(
-                                    `Delete this property?\n\n${f.predicate}: ${preview}`,
-                                  )
-                                ) {
-                                  deleteTriple.mutate(f.id!);
-                                }
-                              }}
-                              className="rounded border border-[color:var(--color-border)] px-1.5 py-0 text-[10px] text-[color:var(--color-muted)] hover:border-[color:var(--color-danger)] hover:text-[color:var(--color-danger)]"
-                            >
-                              ×
-                            </button>
-                          )}
-                        </span>
-                      </div>
-                      <p className="mt-1 whitespace-pre-wrap break-words">
-                        {f.object}
-                      </p>
-                    </li>
-                  ))}
-                </ul>
-              </section>
-            )}
-          </>
         );
       })()}
     </div>

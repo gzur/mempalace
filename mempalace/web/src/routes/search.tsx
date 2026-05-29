@@ -141,11 +141,62 @@ function SearchPage() {
         </p>
       )}
 
+      {q &&
+        results.data?.kg_entities &&
+        results.data.kg_entities.length > 0 && (
+          <details
+            open
+            className="rounded-lg border-l-4 border-[color:var(--color-accent)] border-y border-r border-y-[color:var(--color-border)] border-r-[color:var(--color-border)] bg-[color:var(--color-accent)]/5 p-3"
+          >
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-2 select-none">
+              <span className="flex items-center gap-2">
+                <span className="text-[10px] text-[color:var(--color-muted)] transition-transform duration-150 [details[open]_&]:rotate-90">
+                  ▶
+                </span>
+                <span className="text-[13px] font-semibold uppercase tracking-wide text-[color:var(--color-accent)]">
+                  knowledge graph
+                </span>
+                <span className="rounded-full bg-[color:var(--color-accent)] px-2 py-0.5 text-[10px] font-semibold text-[color:var(--color-accent-fg)]">
+                  {results.data.kg_entities.length}
+                </span>
+              </span>
+              <span className="text-[11px] text-[color:var(--color-muted)]">
+                {results.data.kg_fallback
+                  ? "no drawers matched"
+                  : "entity-name match"}
+              </span>
+            </summary>
+            <ul className="mt-3 flex flex-col gap-1">
+              {results.data.kg_entities.map((e) => (
+                <li key={e.id}>
+                  <Link
+                    to="/kg/$entity"
+                    params={{ entity: e.name }}
+                    className="flex items-center justify-between gap-2 rounded border border-[color:var(--color-border)] bg-[color:var(--color-surface)] px-3 py-2 text-[12px] transition-colors hover:border-[color:var(--color-accent)]"
+                  >
+                    <span className="truncate font-medium">{e.name}</span>
+                    <span className="flex shrink-0 items-center gap-2 text-[color:var(--color-muted)]">
+                      <code className="text-[color:var(--color-accent)]">
+                        {e.type}
+                      </code>
+                      <span className="tabular-nums">deg {e.degree}</span>
+                    </span>
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
+
       {q && results.data && (
-        <p className="text-[12px] text-[color:var(--color-muted)]">
-          {results.data.results.length} result
-          {results.data.results.length === 1 ? "" : "s"}
-        </p>
+        <div className="mt-2 flex items-center gap-2 border-b border-[color:var(--color-border)] pb-1">
+          <h2 className="text-[13px] font-semibold uppercase tracking-wide text-[color:var(--color-muted)]">
+            drawers
+          </h2>
+          <span className="rounded-full bg-[color:var(--color-surface-2)] px-2 py-0.5 text-[10px] font-semibold text-[color:var(--color-muted)]">
+            {results.data.results.length}
+          </span>
+        </div>
       )}
 
       <ul className="flex flex-col gap-2">
@@ -171,40 +222,6 @@ function SearchPage() {
           );
         })}
       </ul>
-
-      {q &&
-        results.data?.kg_entities &&
-        results.data.kg_entities.length > 0 && (
-          <section className="mt-2">
-            <h2 className="mb-2 text-[11px] uppercase tracking-wide text-[color:var(--color-muted)]">
-              knowledge graph entities ({results.data.kg_entities.length})
-            </h2>
-            <p className="mb-2 text-[11px] text-[color:var(--color-muted)]">
-              {results.data.kg_fallback
-                ? "No drawers matched, but these entities exist in the KG with a matching name."
-                : "Entities whose name matches your query. Click to jump to their page."}
-            </p>
-            <ul className="flex flex-col gap-1">
-              {results.data.kg_entities.map((e) => (
-                <li key={e.id}>
-                  <Link
-                    to="/kg/$entity"
-                    params={{ entity: e.name }}
-                    className="flex items-center justify-between gap-2 rounded border border-[color:var(--color-border)] bg-[color:var(--color-surface)] px-3 py-2 text-[12px] transition-colors hover:border-[color:var(--color-accent)]"
-                  >
-                    <span className="truncate font-medium">{e.name}</span>
-                    <span className="flex shrink-0 items-center gap-2 text-[color:var(--color-muted)]">
-                      <code className="text-[color:var(--color-accent)]">
-                        {e.type}
-                      </code>
-                      <span className="tabular-nums">deg {e.degree}</span>
-                    </span>
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
     </div>
   );
 }
