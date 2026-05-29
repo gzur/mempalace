@@ -171,6 +171,39 @@ function SearchPage() {
           );
         })}
       </ul>
+
+      {q &&
+        results.data?.kg_entities &&
+        results.data.kg_entities.length > 0 && (
+          <section className="mt-2">
+            <h2 className="mb-2 text-[11px] uppercase tracking-wide text-[color:var(--color-muted)]">
+              knowledge graph entities ({results.data.kg_entities.length})
+            </h2>
+            <p className="mb-2 text-[11px] text-[color:var(--color-muted)]">
+              No drawers matched, but these entities exist in the KG with a
+              matching name.
+            </p>
+            <ul className="flex flex-col gap-1">
+              {results.data.kg_entities.map((e) => (
+                <li key={e.id}>
+                  <Link
+                    to="/kg/$entity"
+                    params={{ entity: e.name }}
+                    className="flex items-center justify-between gap-2 rounded border border-[color:var(--color-border)] bg-[color:var(--color-surface)] px-3 py-2 text-[12px] transition-colors hover:border-[color:var(--color-accent)]"
+                  >
+                    <span className="truncate font-medium">{e.name}</span>
+                    <span className="flex shrink-0 items-center gap-2 text-[color:var(--color-muted)]">
+                      <code className="text-[color:var(--color-accent)]">
+                        {e.type}
+                      </code>
+                      <span className="tabular-nums">deg {e.degree}</span>
+                    </span>
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
     </div>
   );
 }

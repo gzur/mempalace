@@ -666,6 +666,40 @@ class TestPrunePhraseEntities:
             kg.close()
 
 
+class TestSearchEntities:
+    @pytest.fixture
+    def kg(self, tmp_path):
+        kg = KnowledgeGraph(str(tmp_path / "kg.sqlite3"))
+        kg.add_entity("Emile", entity_type="person")
+        kg.add_entity("Emilia", entity_type="person")
+        kg.add_entity("Gissur", entity_type="person")
+        kg.add_entity("RUV", entity_type="org")
+        kg.add_triple("Emile", "works_at", "RUV")
+        yield kg
+        kg.close()
+
+    def test_substring_match_returns_entities(self, kg):
+        hits = kg.search_entities("emil")
+        names = [h["name"] for h in hits]
+        assert "Emile" in names
+        assert "Emilia" in names
+        assert "Gissur" not in names
+
+    def test_case_insensitive(self, kg):
+        assert any(h["name"] == "Emile" for h in kg.search_entities("EMILE"))
+        assert any(h["name"] == "Emile" for h in kg.search_entities("emile"))
+
+    def test_results_carry_degree(self, kg):
+        hits = kg.search_entities("Emile")
+        emile = next(h for h in hits if h["name"] == "Emile")
+        # One outgoing triple (works_at → RUV).
+        assert emile["degree"] == 1
+
+    def test_empty_query_returns_empty(self, kg):
+        assert kg.search_entities("") == []
+        assert kg.search_entities("   ") == []
+
+
 class TestSetEntityType:
     """``set_entity_type`` mutates the ``type`` column in place. Most
     entities land in the KG as 'unknown' (auto-created via add_triple),

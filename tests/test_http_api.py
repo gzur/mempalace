@@ -200,6 +200,66 @@ class TestKgMerge:
         assert r.json()["success"] is False
 
 
+class TestSearchKGFallback:
+    def test_unmatched_drawers_surfaces_kg_entities(self, app_client, kg):
+        # Semantic search over a small drawer corpus almost always returns
+        # SOMETHING by cosine distance, so the fallback only fires on a
+        # genuinely-empty result set. The /api/v1/search ``mode=fts`` path
+        # routes through palace_sql.fts_search, which does substring
+        # matching only — perfect for testing the 'no drawer mentions
+        # this entity verbatim' case the KG fallback was built for.
+        kg.add_entity("Emile Brouchard", entity_type="person")
+        kg.add_entity("RUV", entity_type="org")
+        kg.add_triple("Emile Brouchard", "works_at", "RUV")
+
+        # The FTS endpoint path is a different shape (palace_sql), so this
+        # test exercises tool_search directly via the JSON-RPC tool.
+        r = app_client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 100,
+                "method": "tools/call",
+                "params": {
+                    "name": "mempalace_search",
+                    "arguments": {
+                        "query": "Emile",
+                        "limit": 5,
+                        "max_distance": 0.05,  # strict; no drawer can match
+                    },
+                },
+            },
+        )
+        assert r.status_code == 200
+        text = r.json()["result"]["content"][0]["text"]
+        body = json.loads(text)
+        assert body.get("kg_fallback") is True
+        kg_names = [e["name"] for e in body.get("kg_entities", [])]
+        assert "Emile Brouchard" in kg_names
+
+    def test_drawer_hits_skip_kg_fallback(self, app_client, kg):
+        # 'TanStack' is in the seeded_collection's frontend drawer.
+        kg.add_entity("TanStack")  # also a KG hit, but drawers should win
+        r = app_client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 101,
+                "method": "tools/call",
+                "params": {
+                    "name": "mempalace_search",
+                    "arguments": {"query": "TanStack", "limit": 5},
+                },
+            },
+        )
+        assert r.status_code == 200
+        body = json.loads(r.json()["result"]["content"][0]["text"])
+        assert body["results"], "expected drawer results for 'TanStack'"
+        # When drawers match, fallback should not fire.
+        assert "kg_entities" not in body or not body["kg_entities"]
+        assert body.get("kg_fallback") is not True
+
+
 class TestKgAddTriple:
     def test_post_adds_entity_valued_triple(self, app_client, kg):
         kg.add_entity("Emile", entity_type="person")

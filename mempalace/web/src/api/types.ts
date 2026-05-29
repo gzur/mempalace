@@ -61,11 +61,23 @@ export interface SearchHit {
   room: string;
 }
 
+export interface KGEntityHit {
+  id: string;
+  name: string;
+  type: string;
+  degree: number;
+}
+
 export interface SearchResponse {
   mode: "semantic" | "fts";
   query?: string;
   count?: number;
   results: SearchHit[];
+  /** Populated by the server-side KG fallback when drawer search returned
+   *  nothing — entity names that match by substring even though no drawer
+   *  mentions them verbatim. */
+  kg_entities?: KGEntityHit[];
+  kg_fallback?: boolean;
   error?: string;
 }
 

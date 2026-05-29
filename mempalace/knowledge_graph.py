@@ -516,6 +516,45 @@ class KnowledgeGraph:
             "candidates": plan,
         }
 
+    def search_entities(self, query: str, limit: int = 10) -> list[dict]:
+        """Case-insensitive substring search over entity names.
+
+        Cheap sqlite ``LIKE`` query; used as a fallback by
+        ``tool_search`` when no drawers match — an entity may exist in
+        the KG without ever appearing verbatim in a drawer.
+
+        Each result includes the entity's degree (incident triple count)
+        so callers can rank by importance.
+        """
+        if not query or not query.strip():
+            return []
+        like = f"%{query.strip()}%"
+        with self._lock:
+            conn = self._conn()
+            rows = conn.execute(
+                """
+                SELECT e.id, e.name, e.type,
+                       (
+                         (SELECT COUNT(*) FROM triples WHERE subject = e.id) +
+                         (SELECT COUNT(*) FROM triples WHERE object  = e.id)
+                       ) AS degree
+                FROM entities e
+                WHERE e.name LIKE ? COLLATE NOCASE
+                ORDER BY degree DESC, LENGTH(e.name) ASC, e.name ASC
+                LIMIT ?
+                """,
+                (like, max(1, min(limit, 100))),
+            ).fetchall()
+        return [
+            {
+                "id": r["id"],
+                "name": r["name"],
+                "type": r["type"] or "unknown",
+                "degree": r["degree"] or 0,
+            }
+            for r in rows
+        ]
+
     def set_entity_type(self, name: str, entity_type: str) -> dict:
         """Update an existing entity's ``type`` (person / org / topic / …).
 

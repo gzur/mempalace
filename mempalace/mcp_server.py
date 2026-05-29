@@ -915,6 +915,23 @@ def tool_search(
             "max_distance": max_distance,
             "min_similarity": min_similarity,
         }
+    # KG fallback: when the drawer search returned nothing, try a
+    # substring match against entity names. People + concepts often live
+    # in the KG before they ever appear verbatim in a drawer, so a search
+    # for 'Emile' should surface him as an entity even if no drawer
+    # mentions him by name. Always returned as a separate ``kg_entities``
+    # field so callers can render it distinctly.
+    drawer_hits = result.get("results") or []
+    if not drawer_hits and not result.get("error"):
+        try:
+            kg_hits = _call_kg(
+                lambda kg: kg.search_entities(sanitized["clean_query"], limit=limit)
+            )
+            if kg_hits:
+                result["kg_entities"] = kg_hits
+                result["kg_fallback"] = True
+        except Exception:
+            logger.exception("tool_search KG fallback failed")
     return result
 
 
