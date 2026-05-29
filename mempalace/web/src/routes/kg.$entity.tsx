@@ -440,49 +440,57 @@ function EntityPage() {
         </p>
       </header>
 
-      {neighborhood && neighborhood.nodes.length > 1 && (
-        <KGGraph
-          graph={neighborhood}
-          highlightName={entity}
-          height={420}
-          // Neighborhoods are small by construction — labelling all of
-          // them is the most useful default here, even when the main
-          // /app/kg view is on ``auto``.
-          labelsMode="all"
-          onNodeClick={(_id, name) => {
-            if (name === entity) return;
-            window.location.assign(`/app/kg/${encodeURIComponent(name)}`);
-          }}
-        />
-      )}
-
       {(() => {
         const currentType =
           fullGraph.data?.nodes.find((n) => n.name === entity)?.type ?? "unknown";
-        return <TypeControl entity={entity} currentType={currentType} />;
+        const otherNames =
+          fullGraph.data?.nodes
+            .map((n) => n.name)
+            .filter((n) => n !== entity) ?? [];
+        return (
+          <div className="flex flex-col gap-4 lg:flex-row">
+            {neighborhood && neighborhood.nodes.length > 1 && (
+              <div className="min-w-0 flex-1">
+                <KGGraph
+                  graph={neighborhood}
+                  highlightName={entity}
+                  // Tall on wide screens so the user can actually read the
+                  // graph; the side panels float to the right and scroll
+                  // independently. Falls back to 420 on narrow viewports
+                  // (the parent is flex-col there).
+                  height={Math.max(
+                    520,
+                    typeof window !== "undefined"
+                      ? Math.min(window.innerHeight - 240, 900)
+                      : 520,
+                  )}
+                  labelsMode="all"
+                  onNodeClick={(_id, name) => {
+                    if (name === entity) return;
+                    window.location.assign(`/app/kg/${encodeURIComponent(name)}`);
+                  }}
+                />
+              </div>
+            )}
+
+            <div className="flex w-full shrink-0 flex-col gap-3 lg:w-[420px]">
+              <TypeControl entity={entity} currentType={currentType} />
+              <AddFactControl
+                subject={entity}
+                entityNames={otherNames}
+                predicateSuggestions={stats.data?.relationship_types ?? []}
+              />
+              <MergeControl
+                entity={entity}
+                otherEntityNames={otherNames}
+                onMerged={(into) => {
+                  navigate({ to: "/kg/$entity", params: { entity: into } });
+                }}
+              />
+            </div>
+          </div>
+        );
       })()}
-
-      <AddFactControl
-        subject={entity}
-        entityNames={
-          fullGraph.data?.nodes
-            .map((n) => n.name)
-            .filter((n) => n !== entity) ?? []
-        }
-        predicateSuggestions={stats.data?.relationship_types ?? []}
-      />
-
-      <MergeControl
-        entity={entity}
-        otherEntityNames={
-          fullGraph.data?.nodes
-            .map((n) => n.name)
-            .filter((n) => n !== entity) ?? []
-        }
-        onMerged={(into) => {
-          navigate({ to: "/kg/$entity", params: { entity: into } });
-        }}
-      />
 
       {facts.data?.error && (
         <p className="text-[color:var(--color-warn)]">{facts.data.error}</p>
