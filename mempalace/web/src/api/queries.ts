@@ -201,6 +201,35 @@ export interface KGSetEntityTypeResponse {
   error?: string;
 }
 
+export interface KGAddTripleResponse {
+  success: boolean;
+  triple_id?: string;
+  fact?: string;
+  error?: string;
+}
+
+/** Add a new triple to the KG. Invalidates KG caches on success. */
+export function useKGAdd() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: {
+      subject: string;
+      predicate: string;
+      object: string;
+      value_text?: string;
+      valid_from?: string;
+    }) =>
+      api<KGAddTripleResponse>("/api/v1/kg/triples", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(vars),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["kg"] });
+    },
+  });
+}
+
 /** PATCH an existing entity's ``type``. Invalidates KG caches on success. */
 export function useKGSetEntityType() {
   const qc = useQueryClient();

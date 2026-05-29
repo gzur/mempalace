@@ -42,6 +42,20 @@ export function OpsChart({ series, height = 240 }: Props) {
   const yTick = niceTicks(max, 4);
 
   const labelEvery = Math.max(1, Math.ceil(buckets.length / 8));
+  // Build a deduped set of indices to label: first, last, plus a
+  // modulo-spaced sample. Drop any modulo-pick that lands too close to
+  // the forced ``last`` so labels never overlap at the right edge.
+  const labelIndices: Set<number> = new Set();
+  const lastIdx = buckets.length - 1;
+  if (buckets.length > 0) {
+    labelIndices.add(0);
+    labelIndices.add(lastIdx);
+    for (let i = 0; i < buckets.length; i += labelEvery) {
+      // Keep at least ``labelEvery`` separation from the last index so
+      // ``05-28`` and ``05-29`` don't render on top of each other.
+      if (lastIdx - i >= labelEvery) labelIndices.add(i);
+    }
+  }
   const hoveredBucket = hover !== null ? buckets[hover] : null;
   const hoveredTotal = hoveredBucket
     ? op_types.reduce((s, t) => s + (hoveredBucket.counts[t] ?? 0), 0)
@@ -132,9 +146,10 @@ export function OpsChart({ series, height = 240 }: Props) {
           );
         })}
 
-        {/* x labels (first, last, evenly sampled middle) */}
+        {/* x labels (first, last, evenly sampled middle — deduped so
+            the forced ``last`` never overlaps a modulo neighbour). */}
         {buckets.map((b, i) =>
-          i === 0 || i === buckets.length - 1 || i % labelEvery === 0 ? (
+          labelIndices.has(i) ? (
             <text
               key={b.key}
               x={padL + i * barW + barW / 2}

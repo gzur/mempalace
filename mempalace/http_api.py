@@ -230,6 +230,20 @@ def kg_set_entity_type(request: Request, body: dict) -> dict:
     )
 
 
+def kg_add_triple(_request: Request, body: dict) -> dict:
+    """Add a triple. POST /api/v1/kg/triples
+    {subject, predicate, object, value_text?, valid_from?, valid_to?}.
+    """
+    return mcp_server.tool_kg_add(
+        subject=str(body.get("subject", "") or ""),
+        predicate=str(body.get("predicate", "") or ""),
+        object=str(body.get("object", "") or ""),
+        valid_from=body.get("valid_from") or None,
+        valid_to=body.get("valid_to") or None,
+        value_text=body.get("value_text") or None,
+    )
+
+
 def kg_merge(_request: Request, body: dict) -> dict:
     """Merge one KG entity into another. POST {from, into}."""
     return mcp_server.tool_kg_merge(
@@ -278,6 +292,7 @@ def routes() -> list[Route]:
         Route("/api/v1/kg/timeline", _wrap(kg_timeline), methods=["GET"]),
         Route("/api/v1/kg/graph", _wrap(kg_graph), methods=["GET"]),
         Route("/api/v1/kg/merge", _wrap_post(kg_merge), methods=["POST"]),
+        Route("/api/v1/kg/triples", _wrap_post(kg_add_triple), methods=["POST"]),
         Route(
             "/api/v1/kg/entity/{name:path}",
             _wrap_post(kg_set_entity_type),

@@ -200,6 +200,51 @@ class TestKgMerge:
         assert r.json()["success"] is False
 
 
+class TestKgAddTriple:
+    def test_post_adds_entity_valued_triple(self, app_client, kg):
+        kg.add_entity("Emile", entity_type="person")
+        kg.add_entity("VAST Iceland", entity_type="org")
+
+        r = app_client.post(
+            "/api/v1/kg/triples",
+            json={
+                "subject": "Emile",
+                "predicate": "works_at",
+                "object": "VAST Iceland",
+            },
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["success"] is True
+        assert body["fact"] == "Emile → works_at → VAST Iceland"
+
+        dump = app_client.get("/api/v1/kg/graph").json()
+        edges = [(e["s"], e["p"], e["o"]) for e in dump["edges"]]
+        assert (kg._entity_id("Emile"), "works_at", kg._entity_id("VAST Iceland")) in edges
+
+    def test_post_adds_text_valued_triple(self, app_client, kg):
+        kg.add_entity("Emile", entity_type="person")
+
+        r = app_client.post(
+            "/api/v1/kg/triples",
+            json={
+                "subject": "Emile",
+                "predicate": "status",
+                "object": "x",  # placeholder; real content in value_text
+                "value_text": "currently between roles, freelance until July",
+            },
+        )
+        assert r.status_code == 200
+        assert r.json()["success"] is True
+
+        facts = app_client.get(
+            "/api/v1/kg/entity", params={"name": "Emile"}
+        ).json()
+        status_fact = next(f for f in facts["facts"] if f["predicate"] == "status")
+        assert status_fact["object_kind"] == "text"
+        assert "freelance" in status_fact["object"]
+
+
 class TestKgSetEntityType:
     def test_patch_updates_entity_type(self, app_client, kg):
         kg.add_entity("RUV")  # default type=unknown

@@ -2,11 +2,13 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 
 import {
+  useKGAdd,
   useKGEntity,
   useKGGraph,
   useKGMerge,
   useKGSetEntityType,
 } from "@/api/queries";
+import { useKGStats } from "@/api/queries";
 import { Breadcrumbs } from "@/components/Breadcrumbs";
 import { KGGraph } from "@/components/KGGraph";
 import { cn } from "@/lib/cn";
@@ -104,6 +106,192 @@ function TypeControl({
           {setType.data.success
             ? `was '${setType.data.previous_type}', now '${setType.data.type}'`
             : (setType.data.error ?? "failed")}
+        </p>
+      )}
+    </section>
+  );
+}
+
+function AddFactControl({
+  subject,
+  entityNames,
+  predicateSuggestions,
+  onAdded,
+}: {
+  subject: string;
+  entityNames: string[];
+  predicateSuggestions: string[];
+  onAdded?: () => void;
+}) {
+  const add = useKGAdd();
+  const [predicate, setPredicate] = useState("");
+  const [object, setObject] = useState("");
+  const [valueText, setValueText] = useState("");
+  const [validFrom, setValidFrom] = useState("");
+  const [kind, setKind] = useState<"entity" | "text">("entity");
+
+  const predListId = useMemo(
+    () => `pred-suggest-${subject.replace(/[^a-zA-Z0-9]/g, "")}`,
+    [subject],
+  );
+  const entityListId = useMemo(
+    () => `entity-suggest-${subject.replace(/[^a-zA-Z0-9]/g, "")}`,
+    [subject],
+  );
+
+  const pred = predicate.trim();
+  const objectInput = kind === "entity" ? object.trim() : valueText.trim();
+  const canSubmit = pred.length > 0 && objectInput.length > 0 && !add.isPending;
+
+  return (
+    <section className="rounded border border-[color:var(--color-border)] bg-[color:var(--color-surface)] p-3">
+      <h2 className="mb-2 text-[11px] uppercase tracking-wide text-[color:var(--color-muted)]">
+        add fact
+      </h2>
+      <p className="mb-2 text-[11px] text-[color:var(--color-muted)]">
+        Adds a new outgoing triple from <code>{subject}</code>. Object can
+        be another entity (autocompletes against the graph) or inline
+        descriptive prose.
+      </p>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!canSubmit) return;
+          add.mutate(
+            {
+              subject,
+              predicate: pred,
+              // tool_kg_add still requires ``object`` as a non-empty
+              // string even when ``value_text`` is set, so pass a
+              // short placeholder for text-valued triples — the actual
+              // prose travels in ``value_text``.
+              object: kind === "entity" ? objectInput : objectInput.slice(0, 40),
+              value_text: kind === "text" ? objectInput : undefined,
+              valid_from: validFrom.trim() || undefined,
+            },
+            {
+              onSuccess: (data) => {
+                if (data.success) {
+                  setPredicate("");
+                  setObject("");
+                  setValueText("");
+                  setValidFrom("");
+                  onAdded?.();
+                }
+              },
+            },
+          );
+        }}
+        className="flex flex-col gap-2 text-[12px]"
+      >
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[color:var(--color-muted)]">subject</span>
+          <code className="text-[color:var(--color-accent)]">{subject}</code>
+          <span className="text-[color:var(--color-muted)]">→</span>
+          <input
+            list={predListId}
+            value={predicate}
+            onChange={(e) => setPredicate(e.target.value)}
+            placeholder="predicate (e.g. works_at)"
+            className="w-48 rounded border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 py-1 outline-none focus:border-[color:var(--color-accent)]"
+          />
+          <datalist id={predListId}>
+            {predicateSuggestions.map((p) => (
+              <option key={p} value={p} />
+            ))}
+          </datalist>
+          <span className="text-[color:var(--color-muted)]">→</span>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[color:var(--color-muted)]">object kind</span>
+          {(["entity", "text"] as const).map((k) => (
+            <button
+              key={k}
+              type="button"
+              onClick={() => setKind(k)}
+              className={cn(
+                "rounded border px-2 py-0.5",
+                k === kind
+                  ? "border-[color:var(--color-accent)] text-[color:var(--color-accent)]"
+                  : "border-[color:var(--color-border)] text-[color:var(--color-muted)] hover:border-[color:var(--color-fg)]",
+              )}
+            >
+              {k}
+            </button>
+          ))}
+          <span className="ml-2 text-[color:var(--color-muted)]">valid from</span>
+          <input
+            value={validFrom}
+            onChange={(e) => setValidFrom(e.target.value)}
+            placeholder="YYYY-MM-DD (optional)"
+            className="w-40 rounded border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 py-1 outline-none focus:border-[color:var(--color-accent)]"
+          />
+        </div>
+
+        {kind === "entity" ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              list={entityListId}
+              value={object}
+              onChange={(e) => setObject(e.target.value)}
+              placeholder="object entity"
+              className="flex-1 rounded border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 py-1 outline-none focus:border-[color:var(--color-accent)]"
+            />
+            <datalist id={entityListId}>
+              {entityNames.slice(0, 500).map((n) => (
+                <option key={n} value={n} />
+              ))}
+            </datalist>
+            <button
+              type="submit"
+              disabled={!canSubmit}
+              className={cn(
+                "rounded border px-3 py-1",
+                canSubmit
+                  ? "border-[color:var(--color-accent)] bg-[color:var(--color-accent)] text-[color:var(--color-accent-fg)]"
+                  : "border-[color:var(--color-border)] text-[color:var(--color-muted)]",
+              )}
+            >
+              {add.isPending ? "adding…" : "add fact"}
+            </button>
+          </div>
+        ) : (
+          <div className="flex items-start gap-2">
+            <textarea
+              value={valueText}
+              onChange={(e) => setValueText(e.target.value)}
+              placeholder="descriptive value (a clause, a status, a quote)"
+              rows={2}
+              className="flex-1 rounded border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 py-1 outline-none focus:border-[color:var(--color-accent)]"
+            />
+            <button
+              type="submit"
+              disabled={!canSubmit}
+              className={cn(
+                "self-start rounded border px-3 py-1",
+                canSubmit
+                  ? "border-[color:var(--color-accent)] bg-[color:var(--color-accent)] text-[color:var(--color-accent-fg)]"
+                  : "border-[color:var(--color-border)] text-[color:var(--color-muted)]",
+              )}
+            >
+              {add.isPending ? "adding…" : "add fact"}
+            </button>
+          </div>
+        )}
+      </form>
+      {add.data && (
+        <p
+          className={cn(
+            "mt-2 text-[12px]",
+            add.data.success
+              ? "text-[color:var(--color-success)]"
+              : "text-[color:var(--color-danger)]",
+          )}
+        >
+          {add.data.success
+            ? `added: ${add.data.fact}`
+            : (add.data.error ?? "failed")}
         </p>
       )}
     </section>
@@ -212,6 +400,7 @@ function EntityPage() {
   // to the entity's neighbors. Cheap because the dump is cached by
   // TanStack Query.
   const fullGraph = useKGGraph(false);
+  const stats = useKGStats();
 
   const neighborhood = (() => {
     const data = fullGraph.data;
@@ -272,6 +461,16 @@ function EntityPage() {
           fullGraph.data?.nodes.find((n) => n.name === entity)?.type ?? "unknown";
         return <TypeControl entity={entity} currentType={currentType} />;
       })()}
+
+      <AddFactControl
+        subject={entity}
+        entityNames={
+          fullGraph.data?.nodes
+            .map((n) => n.name)
+            .filter((n) => n !== entity) ?? []
+        }
+        predicateSuggestions={stats.data?.relationship_types ?? []}
+      />
 
       <MergeControl
         entity={entity}
