@@ -48,6 +48,19 @@ from .config import sanitize_iso_temporal
 
 DEFAULT_KG_PATH = os.path.expanduser("~/.mempalace/knowledge_graph.sqlite3")
 
+# A non-FK sentinel id used in ``triples.object`` for text-valued triples.
+# The actual prose lives in ``triples.value_text``; this string just keeps
+# the NOT NULL constraint happy without referencing a real entity row.
+_TEXT_OBJECT_SENTINEL = "__text__"
+
+# When a caller passes a long ``obj`` string to ``add_triple`` without an
+# explicit ``value_text``, route it to a text-valued triple instead of
+# auto-promoting it to a fake entity. Tuned to catch the descriptive
+# phrases users had ('Article 3.5 allows…', ~100 chars) without
+# misclassifying real multi-word entity names ('Ministry of Finance',
+# 'Gissur Þórhallsson').
+_AUTO_TEXT_THRESHOLD = 80
+
 
 def _is_date_only_temporal(value: str) -> bool:
     return isinstance(value, str) and len(value) == 10 and value[4] == "-" and value[7] == "-"
@@ -157,6 +170,8 @@ class KnowledgeGraph:
                 subject TEXT NOT NULL,
                 predicate TEXT NOT NULL,
                 object TEXT NOT NULL,
+                value_text TEXT,
+                value_kind TEXT DEFAULT 'entity',
                 valid_from TEXT,
                 valid_to TEXT,
                 confidence REAL DEFAULT 1.0,
@@ -192,6 +207,15 @@ class KnowledgeGraph:
             conn.execute("ALTER TABLE triples ADD COLUMN source_drawer_id TEXT")
         if "adapter_name" not in existing:
             conn.execute("ALTER TABLE triples ADD COLUMN adapter_name TEXT")
+        # Text-valued triple objects: descriptive prose stored inline rather
+        # than auto-promoted to a fake entity row. See Phase B of the KG
+        # cleanup work.
+        if "value_text" not in existing:
+            conn.execute("ALTER TABLE triples ADD COLUMN value_text TEXT")
+        if "value_kind" not in existing:
+            conn.execute(
+                "ALTER TABLE triples ADD COLUMN value_kind TEXT DEFAULT 'entity'"
+            )
 
     def _conn(self):
         if self._connection is None:
@@ -246,6 +270,7 @@ class KnowledgeGraph:
         source_file: str = None,
         source_drawer_id: str = None,
         adapter_name: str = None,
+        value_text: str = None,
     ):
         """
         Add a relationship triple: subject → predicate → object.
@@ -255,10 +280,24 @@ class KnowledgeGraph:
         they default to ``None`` so every existing caller stays
         source-compatible.
 
+        ``value_text`` (RFC for Phase B of the KG cleanup) lets the caller
+        attach a *descriptive* object to the triple — a clause, a quote,
+        a status sentence — without promoting that string to a fake
+        entity. When set, ``obj`` is ignored for entity-creation
+        purposes. The triple gets ``value_kind='text'`` and the prose
+        lands in ``value_text``; ``object`` keeps a sentinel id to
+        satisfy NOT NULL.
+
+        If ``value_text`` is not set but ``obj`` is suspiciously long
+        (> 80 chars), we auto-route it to text storage as a safety net
+        against existing kg_add callers that pass clauses as objects.
+
         Examples:
             add_triple("Max", "child_of", "Alice", valid_from="2015-04-01")
             add_triple("Max", "does", "swimming", valid_from="2025-01-01")
-            add_triple("Alice", "worried_about", "Max injury", valid_from="2026-01-01")
+            add_triple("Gissur", "pattern",
+                       "disappears when triggered, bursts followed by collapse",
+                       value_text="disappears when triggered, bursts followed by collapse")
         """
 
         valid_from = sanitize_iso_temporal(valid_from, "valid_from")
@@ -278,10 +317,23 @@ class KnowledgeGraph:
             )
 
         sub_id = self._entity_id(subject)
-        obj_id = self._entity_id(obj)
         pred = predicate.lower().replace(" ", "_")
 
-        # Auto-create entities if they don't exist
+        # Decide: entity-valued or text-valued object?
+        is_text_value = value_text is not None or (
+            isinstance(obj, str) and len(obj) > _AUTO_TEXT_THRESHOLD
+        )
+        if is_text_value:
+            text_value = (value_text if value_text is not None else obj) or ""
+            obj_id = _TEXT_OBJECT_SENTINEL
+            value_kind = "text"
+        else:
+            text_value = None
+            obj_id = self._entity_id(obj)
+            value_kind = "entity"
+
+        # Auto-create entities if they don't exist (subject always, object
+        # only when this is an entity-valued triple).
         with self._lock:
             conn = self._conn()
             with conn:
@@ -289,31 +341,49 @@ class KnowledgeGraph:
                     "INSERT OR IGNORE INTO entities (id, name) VALUES (?, ?)",
                     (sub_id, subject),
                 )
-                conn.execute(
-                    "INSERT OR IGNORE INTO entities (id, name) VALUES (?, ?)",
-                    (obj_id, obj),
-                )
+                if not is_text_value:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO entities (id, name) VALUES (?, ?)",
+                        (obj_id, obj),
+                    )
 
-                # Check for existing identical triple
-                existing = conn.execute(
-                    "SELECT id FROM triples WHERE subject=? AND predicate=? AND object=? AND valid_to IS NULL",
-                    (sub_id, pred, obj_id),
-                ).fetchone()
+                # Check for existing identical triple. For text-valued
+                # triples we also need value_text in the dedup key,
+                # since multiple (subject, predicate) pairs may share
+                # the __text__ sentinel as object.
+                if is_text_value:
+                    existing = conn.execute(
+                        "SELECT id FROM triples "
+                        "WHERE subject=? AND predicate=? AND value_kind='text' "
+                        "AND value_text=? AND valid_to IS NULL",
+                        (sub_id, pred, text_value),
+                    ).fetchone()
+                else:
+                    existing = conn.execute(
+                        "SELECT id FROM triples "
+                        "WHERE subject=? AND predicate=? AND object=? "
+                        "AND (value_kind IS NULL OR value_kind='entity') "
+                        "AND valid_to IS NULL",
+                        (sub_id, pred, obj_id),
+                    ).fetchone()
                 if existing:
                     return existing["id"]  # Already exists and still valid
 
                 triple_id = f"t_{sub_id}_{pred}_{obj_id}_{hashlib.sha256(f'{valid_from}{datetime.now().isoformat()}'.encode()).hexdigest()[:12]}"
                 conn.execute(
                     """INSERT INTO triples (
-                        id, subject, predicate, object, valid_from, valid_to,
+                        id, subject, predicate, object, value_text, value_kind,
+                        valid_from, valid_to,
                         confidence, source_closet, source_file,
                         source_drawer_id, adapter_name
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         triple_id,
                         sub_id,
                         pred,
                         obj_id,
+                        text_value,
+                        value_kind,
                         valid_from,
                         valid_to,
                         confidence,
@@ -495,9 +565,17 @@ class KnowledgeGraph:
             conn = self._conn()
 
             if direction in ("outgoing", "both"):
+                # LEFT JOIN entities: text-valued triples have an
+                # ``__text__`` sentinel as ``object`` which doesn't match
+                # any real entity row. ``COALESCE`` falls through to
+                # ``value_text`` for those.
                 query = (
-                    "SELECT t.*, e.name as obj_name FROM triples t "
-                    "JOIN entities e ON t.object = e.id WHERE t.subject = ?" + temporal_sql
+                    "SELECT t.*, "
+                    "       COALESCE(e.name, t.value_text) AS obj_name, "
+                    "       COALESCE(t.value_kind, 'entity') AS obj_kind "
+                    "FROM triples t "
+                    "LEFT JOIN entities e ON t.object = e.id "
+                    "WHERE t.subject = ?" + temporal_sql
                 )
                 params = [eid] + temporal_params
 
@@ -508,6 +586,7 @@ class KnowledgeGraph:
                             "subject": name,
                             "predicate": row["predicate"],
                             "object": row["obj_name"],
+                            "object_kind": row["obj_kind"],
                             "valid_from": row["valid_from"],
                             "valid_to": row["valid_to"],
                             "confidence": row["confidence"],
@@ -517,6 +596,10 @@ class KnowledgeGraph:
                     )
 
             if direction in ("incoming", "both"):
+                # Text-valued triples can never be 'incoming' on a real
+                # entity — their object is the __text__ sentinel — so
+                # an inner JOIN naturally excludes them. Keep it that
+                # way; nothing to change here for Phase B.
                 query = (
                     "SELECT t.*, e.name as sub_name FROM triples t "
                     "JOIN entities e ON t.subject = e.id WHERE t.object = ?" + temporal_sql
@@ -530,6 +613,7 @@ class KnowledgeGraph:
                             "subject": row["sub_name"],
                             "predicate": row["predicate"],
                             "object": name,
+                            "object_kind": "entity",
                             "valid_from": row["valid_from"],
                             "valid_to": row["valid_to"],
                             "confidence": row["confidence"],
@@ -576,17 +660,24 @@ class KnowledgeGraph:
         return results
 
     def timeline(self, entity_name: str = None):
-        """Get all facts in chronological order, optionally filtered by entity."""
+        """Get all facts in chronological order, optionally filtered by entity.
+
+        Text-valued triples are included; their object surfaces as the
+        ``value_text`` content and ``object_kind`` is ``'text'``.
+        """
         with self._lock:
             conn = self._conn()
             if entity_name:
                 eid = self._entity_id(entity_name)
                 rows = conn.execute(
                     """
-                    SELECT t.*, s.name as sub_name, o.name as obj_name
+                    SELECT t.*,
+                           s.name as sub_name,
+                           COALESCE(o.name, t.value_text) as obj_name,
+                           COALESCE(t.value_kind, 'entity') as obj_kind
                     FROM triples t
                     JOIN entities s ON t.subject = s.id
-                    JOIN entities o ON t.object = o.id
+                    LEFT JOIN entities o ON t.object = o.id
                     WHERE (t.subject = ? OR t.object = ?)
                     ORDER BY t.valid_from ASC NULLS LAST
                     LIMIT 100
@@ -595,10 +686,13 @@ class KnowledgeGraph:
                 ).fetchall()
             else:
                 rows = conn.execute("""
-                    SELECT t.*, s.name as sub_name, o.name as obj_name
+                    SELECT t.*,
+                           s.name as sub_name,
+                           COALESCE(o.name, t.value_text) as obj_name,
+                           COALESCE(t.value_kind, 'entity') as obj_kind
                     FROM triples t
                     JOIN entities s ON t.subject = s.id
-                    JOIN entities o ON t.object = o.id
+                    LEFT JOIN entities o ON t.object = o.id
                     ORDER BY t.valid_from ASC NULLS LAST
                     LIMIT 100
                 """).fetchall()
@@ -608,6 +702,7 @@ class KnowledgeGraph:
                 "subject": r["sub_name"],
                 "predicate": r["predicate"],
                 "object": r["obj_name"],
+                "object_kind": r["obj_kind"],
                 "valid_from": r["valid_from"],
                 "valid_to": r["valid_to"],
                 "current": r["valid_to"] is None,
@@ -636,13 +731,17 @@ class KnowledgeGraph:
         """
         clauses: list[str] = []
         params: list = []
+        # Skip text-valued triples — they're properties of the subject,
+        # not edges between entities. The SPA renders them inline on the
+        # entity-detail page instead.
+        clauses.append("(t.value_kind IS NULL OR t.value_kind = 'entity')")
         if not include_expired:
             clauses.append("(t.valid_to IS NULL)")
         if as_of is not None:
             extra, args = _temporal_filter_sql(as_of)
             clauses.append(extra)
             params.extend(args)
-        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        where = "WHERE " + " AND ".join(clauses)
         with self._lock:
             conn = self._conn()
             triple_rows = conn.execute(

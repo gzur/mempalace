@@ -113,6 +113,9 @@ export interface KGFact {
   valid_to: string | null;
   current?: boolean;
   direction?: "outgoing" | "incoming";
+  /** ``entity`` (subject→object is two entities) or ``text`` (object is
+   *  inline prose stored in the triple's value_text column). */
+  object_kind?: "entity" | "text";
 }
 
 export interface KGEntityResponse {

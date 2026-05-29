@@ -433,6 +433,116 @@ class TestMergeEntities:
             kg.close()
 
 
+class TestTextValuedTriples:
+    """Phase B: descriptive prose objects stored inline in value_text,
+    rather than auto-promoted to fake entity rows."""
+
+    @pytest.fixture
+    def kg(self, tmp_path):
+        kg = KnowledgeGraph(str(tmp_path / "kg.sqlite3"))
+        yield kg
+        kg.close()
+
+    def test_value_text_creates_text_valued_triple(self, kg):
+        kg.add_triple(
+            "Gissur",
+            "pattern",
+            "disappears when triggered",
+            value_text="disappears when triggered, bursts followed by collapse",
+        )
+
+        # No phantom entity for the long phrase — only Gissur exists.
+        conn = kg._conn()
+        names = {
+            r["name"]
+            for r in conn.execute("SELECT name FROM entities").fetchall()
+        }
+        assert names == {"Gissur"}
+
+        # The triple is marked text-valued and stores the prose in value_text.
+        rows = conn.execute(
+            "SELECT object, value_text, value_kind FROM triples"
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["value_kind"] == "text"
+        assert rows[0]["value_text"] == (
+            "disappears when triggered, bursts followed by collapse"
+        )
+        assert rows[0]["object"] == "__text__"
+
+    def test_long_object_auto_routes_to_text(self, kg):
+        # > 80 chars, no explicit value_text → auto-routed.
+        prose = "Article 3.5 allows forced sale at par value (270k) if shareholder leaves -- Gissur must not resign"
+        assert len(prose) > 80
+        kg.add_triple("Gissur", "constraint", prose)
+
+        conn = kg._conn()
+        rows = conn.execute(
+            "SELECT object, value_kind, value_text FROM triples"
+        ).fetchall()
+        assert rows[0]["value_kind"] == "text"
+        assert rows[0]["value_text"] == prose
+        # Article 3.5 phrase did NOT get a phantom entity row.
+        names = {r["name"] for r in conn.execute("SELECT name FROM entities").fetchall()}
+        assert names == {"Gissur"}
+
+    def test_short_object_stays_entity_valued(self, kg):
+        kg.add_triple("Gissur", "works_at", "VAST Iceland")
+
+        conn = kg._conn()
+        rows = conn.execute("SELECT value_kind, object FROM triples").fetchall()
+        assert rows[0]["value_kind"] == "entity"
+        assert rows[0]["object"] == kg._entity_id("VAST Iceland")
+        names = {r["name"] for r in conn.execute("SELECT name FROM entities").fetchall()}
+        assert names == {"Gissur", "VAST Iceland"}
+
+    def test_query_entity_surfaces_text_values(self, kg):
+        kg.add_triple("Gissur", "works_at", "VAST Iceland")
+        kg.add_triple(
+            "Gissur",
+            "pattern",
+            "x",
+            value_text="disappears when triggered, bursts followed by collapse",
+        )
+
+        facts = kg.query_entity("Gissur", direction="outgoing")
+        assert len(facts) == 2
+        by_pred = {f["predicate"]: f for f in facts}
+        assert by_pred["works_at"]["object"] == "VAST Iceland"
+        assert by_pred["works_at"]["object_kind"] == "entity"
+        assert by_pred["pattern"]["object_kind"] == "text"
+        assert "disappears when triggered" in by_pred["pattern"]["object"]
+
+    def test_graph_dump_excludes_text_valued(self, kg):
+        kg.add_entity("Gissur", entity_type="person")
+        kg.add_entity("VAST Iceland", entity_type="org")
+        kg.add_triple("Gissur", "works_at", "VAST Iceland")
+        kg.add_triple(
+            "Gissur",
+            "pattern",
+            "x",
+            value_text="disappears when triggered, bursts followed by collapse",
+        )
+
+        dump = kg.graph_dump()
+        # Only the entity-valued triple shows up as an edge.
+        assert len(dump["edges"]) == 1
+        assert dump["edges"][0]["p"] == "works_at"
+        # Both nodes — Gissur and VAST — appear; no __text__ sentinel.
+        names = {n["name"] for n in dump["nodes"]}
+        assert "Gissur" in names
+        assert "VAST Iceland" in names
+        assert "__text__" not in names
+
+    def test_dedup_works_for_text_valued(self, kg):
+        prose = "disappears when triggered, bursts followed by collapse"
+        a = kg.add_triple("Gissur", "pattern", "x", value_text=prose)
+        b = kg.add_triple("Gissur", "pattern", "x", value_text=prose)
+        assert a == b
+        rows = kg._conn().execute("SELECT COUNT(*) AS c FROM triples").fetchone()
+        assert rows["c"] == 1
+
+
 class TestSetEntityType:
     """``set_entity_type`` mutates the ``type`` column in place. Most
     entities land in the KG as 'unknown' (auto-created via add_triple),

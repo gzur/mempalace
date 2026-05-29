@@ -1485,12 +1485,19 @@ def tool_kg_add(
     source_closet: str = None,
     source_file: str = None,
     source_drawer_id: str = None,
+    value_text: str = None,
 ):
     """Add a relationship to the knowledge graph.
 
     All temporal and provenance fields are optional. ``valid_to`` lets callers
     backfill historical facts with a known end date/time in a single call
     instead of a separate ``kg_invalidate`` call.
+
+    When the *object* of the fact is descriptive prose (a clause, a status
+    sentence, a long quote), pass it as ``value_text`` instead of ``object``.
+    That stores the prose inline as a triple property without polluting
+    the entity table. Long object strings without explicit ``value_text``
+    are auto-routed to text storage to protect the graph from drift.
 
     Temporal values accept either ``YYYY-MM-DD`` or canonical UTC datetimes in
     the form ``YYYY-MM-DDTHH:MM:SSZ``.
@@ -1510,6 +1517,7 @@ def tool_kg_add(
             "subject": subject,
             "predicate": predicate,
             "object": object,
+            "value_text": value_text,
             "valid_from": valid_from,
             "valid_to": valid_to,
             "source_closet": source_closet,
@@ -1528,9 +1536,15 @@ def tool_kg_add(
             source_closet=source_closet,
             source_file=source_file,
             source_drawer_id=source_drawer_id,
+            value_text=value_text,
         )
     )
-    return {"success": True, "triple_id": triple_id, "fact": f"{subject} → {predicate} → {object}"}
+    display_object = value_text if value_text else object
+    return {
+        "success": True,
+        "triple_id": triple_id,
+        "fact": f"{subject} → {predicate} → {display_object}",
+    }
 
 
 def tool_kg_invalidate(subject: str, predicate: str, object: str, ended: str = None):
@@ -2052,6 +2066,10 @@ TOOLS = {
                 "source_drawer_id": {
                     "type": "string",
                     "description": "Drawer ID the fact was extracted from (optional, RFC 002 provenance)",
+                },
+                "value_text": {
+                    "type": "string",
+                    "description": "When the object is descriptive prose (a clause, a status sentence, a quote) rather than an entity name, pass it here instead of in 'object' so the KG stores it inline without creating a phantom entity.",
                 },
             },
             "required": ["subject", "predicate", "object"],
