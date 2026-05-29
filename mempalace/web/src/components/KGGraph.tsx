@@ -39,7 +39,9 @@ interface Props {
   highlightName?: string;
   /** CSS palette per entity type. Falls back to a deterministic colour. */
   typePalette?: Record<string, string>;
-  height?: number;
+  /** Fixed pixel height, or ``"fill"`` to stretch to the parent
+   *  container's height (uses a ResizeObserver on the wrapper). */
+  height?: number | "fill";
   labelsMode?: LabelsMode;
 }
 
@@ -64,8 +66,30 @@ export function KGGraph({
 }: Props) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const fgRef = useRef<ForceGraphMethods<any, any> | undefined>(undefined);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [measuredHeight, setMeasuredHeight] = useState<number>(600);
+  const fillMode = height === "fill";
+
+  // When asked to fill, track the container's height via ResizeObserver
+  // and feed that number to ForceGraph2D (the canvas needs a pixel value).
+  useEffect(() => {
+    if (!fillMode) return;
+    const el = containerRef.current;
+    if (!el) return;
+    const apply = () => {
+      const next = el.clientHeight;
+      if (next > 0) setMeasuredHeight(next);
+    };
+    apply();
+    const ro = new ResizeObserver(apply);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [fillMode]);
+
   const [hovered, setHovered] = useState<Node | null>(null);
   const [hoveredLink, setHoveredLink] = useState<Link | null>(null);
+  const canvasHeight =
+    fillMode || typeof height !== "number" ? measuredHeight : height;
 
   const data = useMemo(() => {
     const lowerHighlight = highlightName?.toLowerCase().trim();
@@ -122,14 +146,15 @@ export function KGGraph({
 
   return (
     <div
-      style={{ height }}
+      ref={containerRef}
+      style={fillMode ? { height: "100%" } : { height }}
       className="relative overflow-hidden rounded border border-[color:var(--color-border)] bg-[color:var(--color-bg)]"
     >
       <ForceGraph2D
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         ref={fgRef as any}
         graphData={data}
-        height={height}
+        height={canvasHeight}
         backgroundColor="rgba(0,0,0,0)"
         cooldownTicks={120}
         nodeRelSize={4}

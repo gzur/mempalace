@@ -448,22 +448,20 @@ function EntityPage() {
             .map((n) => n.name)
             .filter((n) => n !== entity) ?? [];
         return (
-          <div className="flex flex-col gap-4 lg:flex-row">
+          <div
+            // Pin the side-by-side region to a tall viewport-relative
+            // height so the graph fills most of the screen regardless
+            // of monitor size. Falls back to a sensible stack height
+            // when there's no graph data (loading or sink entity).
+            className="flex h-[calc(100vh-180px)] min-h-[520px] flex-col gap-4 lg:flex-row"
+          >
             {neighborhood && neighborhood.nodes.length > 1 && (
-              <div className="min-w-0 flex-1">
+              <div className="min-h-0 min-w-0 flex-1">
                 <KGGraph
                   graph={neighborhood}
                   highlightName={entity}
-                  // Tall on wide screens so the user can actually read the
-                  // graph; the side panels float to the right and scroll
-                  // independently. Falls back to 420 on narrow viewports
-                  // (the parent is flex-col there).
-                  height={Math.max(
-                    520,
-                    typeof window !== "undefined"
-                      ? Math.min(window.innerHeight - 240, 900)
-                      : 520,
-                  )}
+                  // Stretches to fill the column via ResizeObserver.
+                  height="fill"
                   labelsMode="all"
                   onNodeClick={(_id, name) => {
                     if (name === entity) return;
@@ -473,7 +471,7 @@ function EntityPage() {
               </div>
             )}
 
-            <div className="flex w-full shrink-0 flex-col gap-3 lg:w-[420px]">
+            <div className="flex w-full shrink-0 flex-col gap-3 overflow-y-auto lg:w-[420px]">
               <TypeControl entity={entity} currentType={currentType} />
               <AddFactControl
                 subject={entity}
