@@ -176,7 +176,22 @@ def drawer_search(request: Request) -> dict:
     mode = (request.query_params.get("mode") or "semantic").lower()
     if mode == "fts":
         hits = palace_sql.fts_search(q, wing=wing, room=room, limit=limit)
-        return {"mode": "fts", "query": q, "count": len(hits), "results": hits}
+        # FTS path bypasses tool_search, so add the same KG-companion
+        # behaviour by hand: substring search the KG and attach matches.
+        kg_entities: list = []
+        try:
+            kg = mcp_server._get_kg()
+            kg_entities = kg.search_entities(q, limit=limit)
+        except Exception:
+            logger.exception("FTS search: KG companion failed")
+        return {
+            "mode": "fts",
+            "query": q,
+            "count": len(hits),
+            "results": hits,
+            "kg_entities": kg_entities,
+            "kg_fallback": (not hits) and bool(kg_entities),
+        }
     return {
         "mode": "semantic",
         **mcp_server.tool_search(query=q, limit=limit, wing=wing, room=room),

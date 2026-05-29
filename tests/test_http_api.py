@@ -237,9 +237,11 @@ class TestSearchKGFallback:
         kg_names = [e["name"] for e in body.get("kg_entities", [])]
         assert "Emile Brouchard" in kg_names
 
-    def test_drawer_hits_skip_kg_fallback(self, app_client, kg):
-        # 'TanStack' is in the seeded_collection's frontend drawer.
-        kg.add_entity("TanStack")  # also a KG hit, but drawers should win
+    def test_drawer_hits_still_attach_kg_companion(self, app_client, kg):
+        """KG matches surface alongside drawer hits — they're a
+        sidebar, not a fallback. ``kg_fallback`` only marks the
+        empty-drawer case so the UI can word the section differently."""
+        kg.add_entity("TanStack")
         r = app_client.post(
             "/mcp",
             json={
@@ -255,8 +257,9 @@ class TestSearchKGFallback:
         assert r.status_code == 200
         body = json.loads(r.json()["result"]["content"][0]["text"])
         assert body["results"], "expected drawer results for 'TanStack'"
-        # When drawers match, fallback should not fire.
-        assert "kg_entities" not in body or not body["kg_entities"]
+        names = [e["name"] for e in body.get("kg_entities", [])]
+        assert "TanStack" in names
+        # Drawers had hits, so 'fallback' specifically is False/missing.
         assert body.get("kg_fallback") is not True
 
 

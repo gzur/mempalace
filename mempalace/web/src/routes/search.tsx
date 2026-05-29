@@ -180,8 +180,9 @@ function SearchPage() {
               knowledge graph entities ({results.data.kg_entities.length})
             </h2>
             <p className="mb-2 text-[11px] text-[color:var(--color-muted)]">
-              No drawers matched, but these entities exist in the KG with a
-              matching name.
+              {results.data.kg_fallback
+                ? "No drawers matched, but these entities exist in the KG with a matching name."
+                : "Entities whose name matches your query. Click to jump to their page."}
             </p>
             <ul className="flex flex-col gap-1">
               {results.data.kg_entities.map((e) => (
