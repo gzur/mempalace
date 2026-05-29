@@ -543,6 +543,129 @@ class TestTextValuedTriples:
         assert rows["c"] == 1
 
 
+class TestPrunePhraseEntities:
+    """Phase C: convert phrase-shaped entities (long names, never used
+    as subjects) into text-valued triples and delete the dangling row."""
+
+    @pytest.fixture
+    def kg(self, tmp_path):
+        kg = KnowledgeGraph(str(tmp_path / "kg.sqlite3"))
+        # Real entities that should never get pruned.
+        kg.add_entity("Gissur", entity_type="person")
+        kg.add_entity("VAST Iceland", entity_type="org")
+        # Phantom phrase entity, created by writing it as a long object
+        # via the pre-Phase-B code path. Simulate by force-routing
+        # entity-valued through the legacy path: a short string at the
+        # API boundary that's still > 60 chars.
+        long_phrase = (
+            "disappears when triggered, bursts followed by collapse, intellectualizes"
+        )
+        # We add it via the raw entity API so it doesn't get auto-text-routed.
+        kg.add_entity(long_phrase)
+        # And insert the triple directly so object resolves to the phantom.
+        conn = kg._conn()
+        with conn:
+            conn.execute(
+                "INSERT INTO triples (id, subject, predicate, object, value_kind) "
+                "VALUES (?, ?, ?, ?, 'entity')",
+                (
+                    "t_test_pattern",
+                    kg._entity_id("Gissur"),
+                    "pattern",
+                    kg._entity_id(long_phrase),
+                ),
+            )
+        # Add a normal entity-valued triple for completeness.
+        kg.add_triple("Gissur", "works_at", "VAST Iceland")
+        yield kg
+        kg.close()
+
+    def test_dry_run_reports_candidates_without_mutating(self, kg):
+        result = kg.prune_phrase_entities()
+        assert result["dry_run"] is True
+        assert result["candidate_count"] == 1
+        cand = result["candidates"][0]
+        assert "disappears when triggered" in cand["name"]
+        assert cand["incoming_triples"] == 1
+
+        # DB unchanged.
+        conn = kg._conn()
+        entity_count = conn.execute("SELECT COUNT(*) AS c FROM entities").fetchone()["c"]
+        assert entity_count == 3
+
+    def test_apply_rewrites_triples_and_drops_entity(self, kg):
+        result = kg.prune_phrase_entities(apply=True)
+        assert result["dry_run"] is False
+        assert result["entities_pruned"] == 1
+        assert result["triples_rewritten"] == 1
+
+        conn = kg._conn()
+        # Entity row gone.
+        names = {
+            r["name"]
+            for r in conn.execute("SELECT name FROM entities").fetchall()
+        }
+        assert "Gissur" in names
+        assert "VAST Iceland" in names
+        assert not any("disappears" in n for n in names)
+
+        # Triple still there but now text-valued.
+        rows = conn.execute(
+            "SELECT predicate, object, value_kind, value_text FROM triples "
+            "WHERE predicate = 'pattern'"
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["value_kind"] == "text"
+        assert rows[0]["object"] == "__text__"
+        assert "disappears when triggered" in rows[0]["value_text"]
+
+    def test_query_entity_surfaces_pruned_text(self, kg):
+        kg.prune_phrase_entities(apply=True)
+        facts = kg.query_entity("Gissur", direction="outgoing")
+        by_pred = {f["predicate"]: f for f in facts}
+        assert by_pred["pattern"]["object_kind"] == "text"
+        assert "disappears when triggered" in by_pred["pattern"]["object"]
+
+    def test_short_entities_left_alone(self, kg):
+        # Add a short alias-like entity AS A SINK (no outgoing edges).
+        # Should be preserved — too short to look like a phrase.
+        kg.add_entity("RUV")
+        conn = kg._conn()
+        with conn:
+            conn.execute(
+                "INSERT INTO triples (id, subject, predicate, object, value_kind) "
+                "VALUES (?, ?, ?, ?, 'entity')",
+                ("t_test_broadcasts", kg._entity_id("Gissur"), "watches", kg._entity_id("RUV")),
+            )
+
+        result = kg.prune_phrase_entities(apply=True)
+        # Only the long phrase candidate is pruned, RUV survives.
+        names = {
+            r["name"]
+            for r in conn.execute("SELECT name FROM entities").fetchall()
+        }
+        assert "RUV" in names
+        assert result["entities_pruned"] == 1
+
+    def test_entity_with_outgoing_edges_skipped(self, tmp_path):
+        kg = KnowledgeGraph(str(tmp_path / "kg.sqlite3"))
+        try:
+            long_but_real = (
+                "Skyvafnir Investor Agreement (with Jon and the Lawyer) 2024-Q3"
+            )
+            assert len(long_but_real) > 60
+            kg.add_entity(long_but_real)
+            kg.add_entity("Jon")
+            # Real entity uses it as the source of its own facts; it's
+            # an actor not a sink. Must NOT be pruned.
+            kg.add_triple(long_but_real, "involves", "Jon")
+
+            result = kg.prune_phrase_entities()
+            assert result["candidate_count"] == 0
+        finally:
+            kg.close()
+
+
 class TestSetEntityType:
     """``set_entity_type`` mutates the ``type`` column in place. Most
     entities land in the KG as 'unknown' (auto-created via add_triple),

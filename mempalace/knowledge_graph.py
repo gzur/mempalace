@@ -427,6 +427,95 @@ class KnowledgeGraph:
                     (ended, sub_id, pred, obj_id),
                 )
 
+    # ── Cleanup (Phase C) ────────────────────────────────────────────────
+
+    def prune_phrase_entities(
+        self,
+        length_threshold: int = 60,
+        apply: bool = False,
+        limit: Optional[int] = None,
+    ) -> dict:
+        """Migrate descriptive 'phrase entities' to text-valued triples.
+
+        Background (Phase C of the KG cleanup): before Phase B added
+        text-valued triple objects, every object string was promoted to
+        an entity row. Callers that passed clauses like
+        ``"Article 3.5 allows forced sale at par value..."`` as the
+        object of a triple ended up with that clause as a phantom
+        entity. This method finds those phantoms and converts the
+        triples that reference them to text-valued (``value_kind='text'``,
+        prose in ``value_text``), then deletes the phantom entity.
+
+        Heuristic for "phrase entity":
+          - ``LENGTH(name) > length_threshold`` (default 60 chars)
+          - NEVER appears as the ``subject`` of any triple (i.e. only
+            referenced as object — a true sink, not a real actor)
+
+        ``apply=False`` (default) is a dry-run: returns the list of
+        candidates without touching the DB. ``apply=True`` commits the
+        migration in one transaction.
+        """
+        with self._lock:
+            conn = self._conn()
+            sql = (
+                "SELECT e.id, e.name, e.type "
+                "FROM entities e "
+                "WHERE LENGTH(e.name) > ? "
+                "  AND e.id NOT IN (SELECT DISTINCT subject FROM triples) "
+                "ORDER BY LENGTH(e.name) DESC"
+            )
+            params: list = [length_threshold]
+            if limit is not None:
+                sql += " LIMIT ?"
+                params.append(limit)
+            candidates = conn.execute(sql, params).fetchall()
+
+            plan = []
+            total_triples = 0
+            for c in candidates:
+                n = conn.execute(
+                    "SELECT COUNT(*) AS c FROM triples WHERE object = ?",
+                    (c["id"],),
+                ).fetchone()["c"]
+                plan.append(
+                    {
+                        "entity_id": c["id"],
+                        "name": c["name"],
+                        "type": c["type"],
+                        "incoming_triples": n,
+                    }
+                )
+                total_triples += n
+
+            if not apply:
+                return {
+                    "dry_run": True,
+                    "length_threshold": length_threshold,
+                    "candidate_count": len(plan),
+                    "triple_rewrites": total_triples,
+                    "candidates": plan,
+                }
+
+            with conn:
+                applied = 0
+                for c in candidates:
+                    conn.execute(
+                        "UPDATE triples "
+                        "SET value_text = ?, value_kind = 'text', object = ? "
+                        "WHERE object = ?",
+                        (c["name"], _TEXT_OBJECT_SENTINEL, c["id"]),
+                    )
+                    conn.execute("DELETE FROM entities WHERE id = ?", (c["id"],))
+                    applied += 1
+
+        return {
+            "dry_run": False,
+            "length_threshold": length_threshold,
+            "entities_pruned": len(plan),
+            "triples_rewritten": total_triples,
+            "candidates": plan,
+        }
+
     def set_entity_type(self, name: str, entity_type: str) -> dict:
         """Update an existing entity's ``type`` (person / org / topic / …).
 

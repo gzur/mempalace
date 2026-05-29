@@ -722,6 +722,63 @@ def cmd_migrate(args):
     )
 
 
+def cmd_kg_prune_phrase_entities(args) -> int:
+    """``mempalace kg prune-phrase-entities`` — fold phantom phrase
+    entities into text-valued triples and delete the entity rows.
+
+    Dry-run by default; pass ``--yes`` to apply.
+    """
+    import sys
+
+    from .knowledge_graph import KnowledgeGraph
+
+    kg = KnowledgeGraph()
+    try:
+        result = kg.prune_phrase_entities(
+            length_threshold=args.length_threshold,
+            apply=args.yes,
+            limit=args.limit,
+        )
+    finally:
+        kg.close()
+
+    if not result["candidates"]:
+        print(
+            f"No phrase entities longer than {result['length_threshold']} "
+            "characters and never used as triple subjects.",
+            file=sys.stderr,
+        )
+        return 0
+
+    mode = "DRY RUN" if result["dry_run"] else "APPLIED"
+    print(f"=== {mode} ===", file=sys.stderr)
+    print(
+        f"Threshold: length > {result['length_threshold']} chars, "
+        "entity never appears as triple subject.",
+        file=sys.stderr,
+    )
+    for c in result["candidates"]:
+        n = c["incoming_triples"]
+        name = c["name"]
+        preview = (name[:90] + "…") if len(name) > 90 else name
+        print(f"  [{n:>2}] {preview}", file=sys.stderr)
+
+    if result["dry_run"]:
+        print(
+            f"\nWould prune {result['candidate_count']} entities, "
+            f"rewriting {result['triple_rewrites']} triples to text-valued.",
+            file=sys.stderr,
+        )
+        print("Re-run with --yes to apply.", file=sys.stderr)
+    else:
+        print(
+            f"\nPruned {result['entities_pruned']} entities, "
+            f"rewrote {result['triples_rewritten']} triples.",
+            file=sys.stderr,
+        )
+    return 0
+
+
 def cmd_status(args):
     from .miner import status
 
@@ -1401,6 +1458,38 @@ def main():
         help="Only split files containing at least N sessions (default: 2)",
     )
 
+    # kg
+    p_kg = sub.add_parser(
+        "kg",
+        help="Knowledge-graph maintenance commands",
+    )
+    kg_sub = p_kg.add_subparsers(dest="kg_action")
+    p_kg_prune = kg_sub.add_parser(
+        "prune-phrase-entities",
+        help=(
+            "Fold descriptive phrase entities (long names, never used as "
+            "triple subjects) into text-valued triples and delete the "
+            "dangling rows. Dry-run by default."
+        ),
+    )
+    p_kg_prune.add_argument(
+        "--yes",
+        action="store_true",
+        help="Apply the prune (default is dry-run, listing candidates only)",
+    )
+    p_kg_prune.add_argument(
+        "--length-threshold",
+        type=int,
+        default=60,
+        help="Minimum entity-name length to consider a phrase (default: 60)",
+    )
+    p_kg_prune.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Only consider the top N candidates by name length",
+    )
+
     # hook
     p_hook = sub.add_parser(
         "hook",
@@ -1567,6 +1656,16 @@ def main():
             return
         args.name = name
         cmd_instructions(args)
+        return
+
+    if args.command == "kg":
+        action = getattr(args, "kg_action", None)
+        if action == "prune-phrase-entities":
+            rc = cmd_kg_prune_phrase_entities(args)
+            if isinstance(rc, int):
+                sys.exit(rc)
+            return
+        p_kg.print_help()
         return
 
     dispatch = {
