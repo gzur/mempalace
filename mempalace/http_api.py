@@ -267,6 +267,20 @@ def kg_delete_triple(request: Request) -> dict:
     )
 
 
+def kg_delete_entity(request: Request) -> dict:
+    """Delete a KG entity.
+
+    DELETE /api/v1/kg/entity/{name}?cascade=1 — when cascade is truthy,
+    sweeps every incident triple before dropping the entity. Default
+    refuses if any triples reference it (returns success=False so the
+    SPA can re-prompt the user).
+    """
+    return mcp_server.tool_kg_delete_entity(
+        name=request.path_params.get("name", "") or "",
+        cascade=_opt_bool(request, "cascade"),
+    )
+
+
 def kg_merge(_request: Request, body: dict) -> dict:
     """Merge one KG entity into another. POST {from, into}."""
     return mcp_server.tool_kg_merge(
@@ -325,6 +339,11 @@ def routes() -> list[Route]:
             "/api/v1/kg/entity/{name:path}",
             _wrap_post(kg_set_entity_type),
             methods=["PATCH"],
+        ),
+        Route(
+            "/api/v1/kg/entity/{name:path}",
+            _wrap(kg_delete_entity),
+            methods=["DELETE"],
         ),
         Route("/api/v1/health", _wrap(health_endpoint), methods=["GET"]),
     ]

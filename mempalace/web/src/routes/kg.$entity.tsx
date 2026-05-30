@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import {
   useKGAdd,
+  useKGDeleteEntity,
   useKGDeleteTriple,
   useKGEntity,
   useKGGraph,
@@ -299,6 +300,101 @@ function AddFactControl({
   );
 }
 
+function DeleteEntityControl({
+  entity,
+  onDeleted,
+}: {
+  entity: string;
+  onDeleted: () => void;
+}) {
+  const del = useKGDeleteEntity();
+  const data = del.data;
+  const showCascadePrompt =
+    data && data.success === false && (data.incident_triples ?? 0) > 0;
+
+  const runDelete = (cascade: boolean) => {
+    del.mutate(
+      { name: entity, cascade },
+      {
+        onSuccess: (res) => {
+          if (res.deleted) {
+            onDeleted();
+          }
+        },
+      },
+    );
+  };
+
+  return (
+    <section className="rounded border border-[color:var(--color-danger)]/40 bg-[color:var(--color-surface)] p-3">
+      <h2 className="mb-2 text-[11px] uppercase tracking-wide text-[color:var(--color-danger)]">
+        danger zone
+      </h2>
+      <p className="mb-2 text-[11px] text-[color:var(--color-muted)]">
+        Drop this entity from the graph. Refuses by default when triples
+        still reference it; the cascade option also removes those
+        triples.
+      </p>
+      <button
+        type="button"
+        disabled={del.isPending}
+        onClick={() => {
+          if (
+            window.confirm(
+              `Delete entity '${entity}'?\n\nIf it has any incident triples this will refuse — you'll then be offered a cascade option.`,
+            )
+          ) {
+            runDelete(false);
+          }
+        }}
+        className={cn(
+          "rounded border px-3 py-1 text-[12px]",
+          del.isPending
+            ? "border-[color:var(--color-border)] text-[color:var(--color-muted)]"
+            : "border-[color:var(--color-danger)] text-[color:var(--color-danger)] hover:bg-[color:var(--color-danger)] hover:text-[color:var(--color-accent-fg)]",
+        )}
+      >
+        {del.isPending ? "deleting…" : "delete entity"}
+      </button>
+      {showCascadePrompt && (
+        <div className="mt-2 rounded border border-[color:var(--color-warn)]/40 bg-[color:var(--color-warn)]/10 px-3 py-2 text-[12px]">
+          <div className="mb-2 text-[color:var(--color-warn)]">
+            Refused: {data!.incident_triples} incident triple(s).
+          </div>
+          <button
+            type="button"
+            disabled={del.isPending}
+            onClick={() => {
+              if (
+                window.confirm(
+                  `Cascade-delete '${entity}' and its ${data!.incident_triples} incident triple(s)? This cannot be undone.`,
+                )
+              ) {
+                runDelete(true);
+              }
+            }}
+            className="rounded border border-[color:var(--color-danger)] bg-[color:var(--color-danger)] px-3 py-1 text-[color:var(--color-accent-fg)]"
+          >
+            cascade delete (drops {data!.incident_triples} triple
+            {data!.incident_triples === 1 ? "" : "s"})
+          </button>
+        </div>
+      )}
+      {data && data.deleted && (
+        <p className="mt-2 text-[12px] text-[color:var(--color-success)]">
+          deleted {data.name} (swept {data.triples_deleted} triple
+          {data.triples_deleted === 1 ? "" : "s"})
+        </p>
+      )}
+      {del.isError && (
+        <p className="mt-2 text-[12px] text-[color:var(--color-danger)]">
+          {(del.error as Error).message}
+        </p>
+      )}
+    </section>
+  );
+}
+
 function MergeControl({
   entity,
   otherEntityNames,
@@ -486,6 +582,11 @@ function EntityPage() {
                 onMerged={(into) => {
                   navigate({ to: "/kg/$entity", params: { entity: into } });
                 }}
+              />
+
+              <DeleteEntityControl
+                entity={entity}
+                onDeleted={() => navigate({ to: "/kg" })}
               />
 
               {facts.data?.error && (

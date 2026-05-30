@@ -666,6 +666,82 @@ class TestPrunePhraseEntities:
             kg.close()
 
 
+class TestDeleteEntity:
+    @pytest.fixture
+    def kg(self, tmp_path):
+        kg = KnowledgeGraph(str(tmp_path / "kg.sqlite3"))
+        kg.add_entity("Emile", entity_type="person")
+        kg.add_entity("RUV", entity_type="org")
+        kg.add_triple("Emile", "works_at", "RUV")
+        yield kg
+        kg.close()
+
+    def test_delete_orphan_entity_drops_row(self, tmp_path):
+        kg = KnowledgeGraph(str(tmp_path / "kg.sqlite3"))
+        try:
+            kg.add_entity("Lonely")
+            result = kg.delete_entity("Lonely")
+            assert result["success"] is True
+            assert result["deleted"] is True
+            assert result["triples_deleted"] == 0
+            names = {
+                r["name"]
+                for r in kg._conn().execute("SELECT name FROM entities").fetchall()
+            }
+            assert "Lonely" not in names
+        finally:
+            kg.close()
+
+    def test_default_refuses_when_triples_exist(self, kg):
+        result = kg.delete_entity("Emile")
+        assert result["success"] is False
+        assert result["deleted"] is False
+        assert result["incident_triples"] == 1
+        # Entity still there.
+        names = {
+            r["name"]
+            for r in kg._conn().execute("SELECT name FROM entities").fetchall()
+        }
+        assert "Emile" in names
+
+    def test_cascade_drops_triples_then_entity(self, kg):
+        result = kg.delete_entity("Emile", cascade=True)
+        assert result["success"] is True
+        assert result["deleted"] is True
+        assert result["triples_deleted"] == 1
+
+        conn = kg._conn()
+        names = {r["name"] for r in conn.execute("SELECT name FROM entities").fetchall()}
+        assert "Emile" not in names
+        # RUV survives — only triples touching Emile were swept.
+        assert "RUV" in names
+        triple_count = conn.execute("SELECT COUNT(*) AS c FROM triples").fetchone()["c"]
+        assert triple_count == 0
+
+    def test_missing_entity_is_soft_miss(self, kg):
+        result = kg.delete_entity("NoSuch")
+        assert result["success"] is True
+        assert result["deleted"] is False
+        assert result["triples_deleted"] == 0
+
+    def test_cascade_handles_incoming_object_side(self, kg):
+        # RUV is only ever an OBJECT here. Cascade should still sweep
+        # its incident triple.
+        result = kg.delete_entity("RUV", cascade=True)
+        assert result["success"] is True
+        assert result["triples_deleted"] == 1
+        names = {
+            r["name"]
+            for r in kg._conn().execute("SELECT name FROM entities").fetchall()
+        }
+        assert "RUV" not in names
+        assert "Emile" in names  # Emile still there as a sink-less node
+
+    def test_empty_name_rejected(self, kg):
+        with pytest.raises(ValueError):
+            kg.delete_entity("")
+
+
 class TestDeleteTriple:
     @pytest.fixture
     def kg(self, tmp_path):

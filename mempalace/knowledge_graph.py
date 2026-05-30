@@ -555,6 +555,73 @@ class KnowledgeGraph:
             for r in rows
         ]
 
+    def delete_entity(self, name: str, cascade: bool = False) -> dict:
+        """Delete an entity row, optionally cascading to its triples.
+
+        Returns ``{success, deleted, name, triples_deleted}``.
+
+        - ``deleted=False`` (success=True) when the entity does not
+          exist — soft-miss, same shape as ``delete_triple``.
+        - When the entity exists and has incident triples (subject OR
+          object), the default ``cascade=False`` mode REFUSES the
+          delete and returns ``success=False`` with ``triples_deleted``
+          populated so the caller can re-prompt with cascade.
+        - ``cascade=True`` removes all incident triples in one
+          transaction and then drops the entity row. The
+          ``triples_deleted`` field reports how many were swept.
+        """
+        if not name or not name.strip():
+            raise ValueError("name is required")
+        eid = self._entity_id(name)
+        with self._lock:
+            conn = self._conn()
+            entity_row = conn.execute(
+                "SELECT id, name FROM entities WHERE id = ?", (eid,)
+            ).fetchone()
+            if not entity_row:
+                return {
+                    "success": True,
+                    "deleted": False,
+                    "name": name,
+                    "triples_deleted": 0,
+                }
+
+            triple_count = conn.execute(
+                "SELECT COUNT(*) AS c FROM triples WHERE subject = ? OR object = ?",
+                (eid, eid),
+            ).fetchone()["c"]
+
+            if triple_count > 0 and not cascade:
+                return {
+                    "success": False,
+                    "deleted": False,
+                    "name": entity_row["name"],
+                    "triples_deleted": 0,
+                    "incident_triples": triple_count,
+                    "error": (
+                        f"entity {entity_row['name']!r} still has {triple_count} "
+                        "incident triple(s); call again with cascade=True to "
+                        "drop them too"
+                    ),
+                }
+
+            with conn:
+                deleted_triples = 0
+                if cascade and triple_count > 0:
+                    cur = conn.execute(
+                        "DELETE FROM triples WHERE subject = ? OR object = ?",
+                        (eid, eid),
+                    )
+                    deleted_triples = cur.rowcount or triple_count
+                conn.execute("DELETE FROM entities WHERE id = ?", (eid,))
+
+        return {
+            "success": True,
+            "deleted": True,
+            "name": entity_row["name"],
+            "triples_deleted": deleted_triples,
+        }
+
     def delete_triple(self, triple_id: str) -> dict:
         """Hard-delete one triple by id. Returns ``{success, deleted: bool,
         triple_id, fact?}``. ``deleted`` is False (without raising) when

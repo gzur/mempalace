@@ -308,6 +308,40 @@ class TestKgAddTriple:
         assert "freelance" in status_fact["object"]
 
 
+class TestKgDeleteEntity:
+    def test_delete_orphan_via_api(self, app_client, kg):
+        kg.add_entity("Lonely")
+        r = app_client.delete("/api/v1/kg/entity/Lonely")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["success"] is True
+        assert body["deleted"] is True
+        assert body["triples_deleted"] == 0
+
+    def test_default_refuses_with_incident_triples(self, app_client, kg):
+        kg.add_entity("Emile", entity_type="person")
+        kg.add_entity("RUV", entity_type="org")
+        kg.add_triple("Emile", "works_at", "RUV")
+
+        r = app_client.delete("/api/v1/kg/entity/Emile")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["success"] is False
+        assert body["incident_triples"] == 1
+
+    def test_cascade_drops_triples_and_entity(self, app_client, kg):
+        kg.add_entity("Emile", entity_type="person")
+        kg.add_entity("RUV", entity_type="org")
+        kg.add_triple("Emile", "works_at", "RUV")
+
+        r = app_client.delete("/api/v1/kg/entity/Emile?cascade=1")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["success"] is True
+        assert body["deleted"] is True
+        assert body["triples_deleted"] == 1
+
+
 class TestKgDeleteTriple:
     def test_delete_drops_the_triple(self, app_client, kg):
         kg.add_entity("Emile", entity_type="person")

@@ -1654,6 +1654,26 @@ def tool_kg_set_entity_type(name: str, entity_type: str) -> dict:
         return {"success": False, "error": str(e)}
 
 
+def tool_kg_delete_entity(name: str, cascade: bool = False) -> dict:
+    """Delete a KG entity, optionally cascading to its triples.
+
+    Without ``cascade=True`` the call refuses when the entity has
+    incident triples (subject OR object). The refusal response carries
+    ``incident_triples`` so a UI can re-prompt with cascade enabled.
+    """
+    try:
+        name = sanitize_kg_value(name, "name")
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+
+    _wal_log("kg_delete_entity", {"name": name, "cascade": bool(cascade)})
+
+    try:
+        return _call_kg(lambda kg: kg.delete_entity(name, cascade=bool(cascade)))
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+
+
 def tool_kg_delete_triple(triple_id: str) -> dict:
     """Hard-delete a single triple by id.
 
@@ -2162,6 +2182,22 @@ TOOLS = {
             "required": ["name", "entity_type"],
         },
         "handler": tool_kg_set_entity_type,
+    },
+    "mempalace_kg_delete_entity": {
+        "description": "Delete a KG entity. With cascade=False (default), refuses when the entity has incident triples and returns incident_triples so a UI can re-prompt. With cascade=True, sweeps every triple referencing the entity (subject OR object) and then drops the entity row.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Entity to delete"},
+                "cascade": {
+                    "type": "boolean",
+                    "description": "When True, also delete every incident triple (subject OR object). Default False refuses if any incident triples exist.",
+                    "default": False,
+                },
+            },
+            "required": ["name"],
+        },
+        "handler": tool_kg_delete_entity,
     },
     "mempalace_kg_delete_triple": {
         "description": "Hard-delete a triple by id. Use to remove a wrong/legacy fact entirely. For temporal invalidation (mark no-longer-true while keeping history) use mempalace_kg_invalidate instead. Returns deleted=False (not an error) when the id is gone.",

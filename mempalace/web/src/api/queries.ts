@@ -216,6 +216,32 @@ export interface KGDeleteTripleResponse {
   error?: string;
 }
 
+export interface KGDeleteEntityResponse {
+  success: boolean;
+  deleted?: boolean;
+  name?: string;
+  triples_deleted?: number;
+  incident_triples?: number;
+  error?: string;
+}
+
+/** Delete a KG entity. ``cascade=true`` sweeps incident triples first. */
+export function useKGDeleteEntity() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { name: string; cascade?: boolean }) => {
+      const q = vars.cascade ? "?cascade=1" : "";
+      return api<KGDeleteEntityResponse>(
+        `/api/v1/kg/entity/${encodeURIComponent(vars.name)}${q}`,
+        { method: "DELETE" },
+      );
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["kg"] });
+    },
+  });
+}
+
 /** Hard-delete a triple by id. Invalidates KG caches on success. */
 export function useKGDeleteTriple() {
   const qc = useQueryClient();
