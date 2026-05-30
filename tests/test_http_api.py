@@ -113,6 +113,22 @@ class TestSearchEndpoint:
         assert body["mode"] == "fts"
         assert any("TanStack" in h["snippet"] for h in body["results"])
 
+    @pytest.mark.parametrize(
+        "q",
+        ["foo-bar", "C++", 'quote"unmatched', "a:b", "fts5+nope"],
+    )
+    def test_fts_mode_punctuation_does_not_500(self, app_client, q):
+        # Regression: palace_sql.fts_search used to send raw user text to
+        # SQLite FTS5 MATCH, which raised OperationalError on punctuation
+        # ("no such column: bar", "fts5: syntax error near '+'", etc.).
+        # http_api.drawer_search did not catch it, so any ordinary query
+        # with a hyphen or quote turned into a 500.
+        r = app_client.get(
+            "/api/v1/search", params={"q": q, "mode": "fts", "limit": 5}
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["mode"] == "fts"
+
 
 class TestOpsEndpoints:
     def test_recent_ops_passes_through_tool(self, app_client):

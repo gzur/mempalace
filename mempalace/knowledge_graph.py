@@ -969,12 +969,22 @@ class KnowledgeGraph:
         # not edges between entities. The SPA renders them inline on the
         # entity-detail page instead.
         clauses.append("(t.value_kind IS NULL OR t.value_kind = 'entity')")
-        if not include_expired:
-            clauses.append("(t.valid_to IS NULL)")
         if as_of is not None:
+            # ``_temporal_filter_sql`` returns SQL with a leading " AND "
+            # because its other callers append it to an existing WHERE
+            # clause. Strip that here — we AND-join clauses ourselves.
+            # When ``as_of`` is set the temporal filter is the source of
+            # truth for validity, so we skip the ``valid_to IS NULL``
+            # clause that would otherwise hide facts expired by today
+            # but valid at the requested point in time.
             extra, args = _temporal_filter_sql(as_of)
+            extra = extra.lstrip()
+            if extra.startswith("AND "):
+                extra = extra[len("AND ") :]
             clauses.append(extra)
             params.extend(args)
+        elif not include_expired:
+            clauses.append("(t.valid_to IS NULL)")
         where = "WHERE " + " AND ".join(clauses)
         with self._lock:
             conn = self._conn()

@@ -18,12 +18,25 @@ Document text is stored as an ``embedding_metadata`` row with ``key='chroma:docu
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any, Optional
 
 _DRAWERS_COLLECTION = "mempalace_drawers"
 _DOCUMENT_KEY = "chroma:document"
+
+# FTS5 MATCH expressions are a tiny query language — raw user input with
+# punctuation ('foo-bar', 'C++', unmatched quote) is a syntax error there.
+# Strip to alnum tokens of length >= 3 (the trigram tokenizer can't match
+# shorter ones) and OR-join with the same defensive shape that
+# ``searcher._bm25_only_via_sqlite`` uses.
+_FTS_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def _safe_fts_match(query: str) -> str:
+    tokens = [t for t in _FTS_TOKEN_RE.findall(query.lower()) if len(t) >= 3]
+    return " OR ".join(tokens)
 
 
 def db_path() -> Path:
@@ -227,28 +240,34 @@ def fts_search(
     """
     if not query.strip():
         return []
+    fts_query = _safe_fts_match(query)
+    if not fts_query:
+        return []
     with db_conn() as conn:
         seg = drawer_segment_id(conn)
         if not seg:
             return []
-        rows = conn.execute(
-            "SELECT e.embedding_id AS drawer_id, "
-            "       wing_em.string_value AS wing, "
-            "       room_em.string_value AS room, "
-            "       fts.string_value AS document "
-            "FROM embedding_fulltext_search fts "
-            "JOIN embedding_metadata em "
-            "    ON em.id = fts.rowid AND em.key = ? "
-            "JOIN embeddings e ON e.id = fts.rowid "
-            "LEFT JOIN embedding_metadata wing_em "
-            "    ON wing_em.id = e.id AND wing_em.key = 'wing' "
-            "LEFT JOIN embedding_metadata room_em "
-            "    ON room_em.id = e.id AND room_em.key = 'room' "
-            "WHERE fts.string_value MATCH ? "
-            "  AND e.segment_id = ? "
-            "LIMIT ?",
-            (_DOCUMENT_KEY, query, seg, limit * 5),
-        ).fetchall()
+        try:
+            rows = conn.execute(
+                "SELECT e.embedding_id AS drawer_id, "
+                "       wing_em.string_value AS wing, "
+                "       room_em.string_value AS room, "
+                "       fts.string_value AS document "
+                "FROM embedding_fulltext_search fts "
+                "JOIN embedding_metadata em "
+                "    ON em.id = fts.rowid AND em.key = ? "
+                "JOIN embeddings e ON e.id = fts.rowid "
+                "LEFT JOIN embedding_metadata wing_em "
+                "    ON wing_em.id = e.id AND wing_em.key = 'wing' "
+                "LEFT JOIN embedding_metadata room_em "
+                "    ON room_em.id = e.id AND room_em.key = 'room' "
+                "WHERE fts.string_value MATCH ? "
+                "  AND e.segment_id = ? "
+                "LIMIT ?",
+                (_DOCUMENT_KEY, fts_query, seg, limit * 5),
+            ).fetchall()
+        except sqlite3.Error:
+            return []
         hits: list[dict] = []
         for r in rows:
             w = r["wing"] or ""

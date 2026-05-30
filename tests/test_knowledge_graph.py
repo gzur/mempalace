@@ -534,6 +534,35 @@ class TestTextValuedTriples:
         assert "VAST Iceland" in names
         assert "__text__" not in names
 
+    def test_graph_dump_as_of_does_not_crash(self, kg):
+        # Regression: graph_dump used to splice _temporal_filter_sql's
+        # leading " AND " into a WHERE-clause list, producing "AND  AND"
+        # and a sqlite OperationalError for any as_of value.
+        kg.add_entity("Alice", entity_type="person")
+        kg.add_entity("Bob", entity_type="person")
+        kg.add_triple("Alice", "knows", "Bob", valid_from="2020-01-01")
+        dump = kg.graph_dump(as_of="2021-01-01")
+        assert any(e["p"] == "knows" for e in dump["edges"])
+
+    def test_graph_dump_as_of_includes_historical_facts(self, kg):
+        # Regression: after the AND-AND fix, the valid_to IS NULL clause
+        # used to still apply when as_of was supplied, hiding facts that
+        # had expired by today but were valid at the requested as_of.
+        kg.add_entity("Alice", entity_type="person")
+        kg.add_entity("Carol", entity_type="person")
+        kg.add_triple(
+            "Alice",
+            "works_at",
+            "Carol",
+            valid_from="2019-01-01",
+            valid_to="2022-12-31",
+        )
+        assert kg.graph_dump()["edges"] == []
+        d_2021 = kg.graph_dump(as_of="2021-06-01")
+        assert any(e["p"] == "works_at" for e in d_2021["edges"])
+        d_2025 = kg.graph_dump(as_of="2025-06-01")
+        assert d_2025["edges"] == []
+
     def test_dedup_works_for_text_valued(self, kg):
         prose = "disappears when triggered, bursts followed by collapse"
         a = kg.add_triple("Gissur", "pattern", "x", value_text=prose)
