@@ -297,3 +297,43 @@ export function useKGSetEntityType() {
     },
   });
 }
+
+export interface KGBulkSetEntityTypeResult {
+  type: string;
+  results: { name: string; ok: boolean; response?: KGSetEntityTypeResponse; error?: string }[];
+}
+
+/**
+ * Bulk version of useKGSetEntityType. Fires every PATCH in parallel and
+ * invalidates the KG caches once when they have all settled, so a 50-entity
+ * relabel doesn't trigger 50 refetches.
+ */
+export function useKGSetEntityTypeBulk() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (vars: {
+      entities: string[];
+      type: string;
+    }): Promise<KGBulkSetEntityTypeResult> => {
+      const results = await Promise.all(
+        vars.entities.map((name) =>
+          api<KGSetEntityTypeResponse>(
+            `/api/v1/kg/entity/${encodeURIComponent(name)}`,
+            {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ type: vars.type }),
+            },
+          ).then(
+            (r) => ({ name, ok: !!r.success, response: r }),
+            (e) => ({ name, ok: false, error: String(e) }),
+          ),
+        ),
+      );
+      return { type: vars.type, results };
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["kg"] });
+    },
+  });
+}

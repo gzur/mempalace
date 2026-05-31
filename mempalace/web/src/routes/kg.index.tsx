@@ -80,6 +80,12 @@ function KGPage() {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2 text-[12px]">
+          <Link
+            to="/kg/relabel"
+            className="rounded border border-[color:var(--color-border)] px-2 py-0.5 text-[color:var(--color-muted)] hover:border-[color:var(--color-fg)]"
+          >
+            bulk relabel
+          </Link>
           <button
             type="button"
             onClick={() =>
