@@ -162,9 +162,9 @@ function KGPage() {
         </div>
       )}
 
-      <section>
+      <section className="h-[calc(100vh-280px)] min-h-[420px]">
         {graph.isPending ? (
-          <div className="grid h-[600px] place-items-center text-[12px] text-[color:var(--color-muted)]">
+          <div className="grid h-full place-items-center text-[12px] text-[color:var(--color-muted)]">
             loading graph…
           </div>
         ) : graph.isError ? (
@@ -177,6 +177,7 @@ function KGPage() {
             highlightName={search.q}
             typePalette={TYPE_PALETTE}
             labelsMode={labels}
+            height="fill"
             onNodeClick={(_id, name) =>
               navigate({
                 to: "/kg/$entity",
