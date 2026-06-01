@@ -41,6 +41,19 @@ class TestChunkExchanges:
         chunks = chunk_exchanges(content)
         assert len(chunks) >= 1
 
+    def test_giant_single_paragraph_splits_to_chunk_size(self):
+        # Regression for self-u7o: an ~8MB single-paragraph SQL dump used
+        # to land as one drawer because _chunk_by_paragraph emitted any
+        # paragraph above MIN_CHUNK_SIZE whole. The hard size cap inside
+        # the paragraph loop now splits paragraphs at CHUNK_SIZE.
+        from mempalace.convo_miner import CHUNK_SIZE
+
+        blob = "INSERT INTO foo VALUES (1, 'data'); " * 30_000  # ~1.05 MB
+        chunks = chunk_exchanges(blob)
+        assert len(chunks) > 1
+        for c in chunks:
+            assert len(c["content"]) <= CHUNK_SIZE
+
     def test_empty_content(self):
         chunks = chunk_exchanges("")
         assert chunks == []
@@ -102,6 +115,22 @@ class TestScanConvos:
         (tmp_path / "chat.txt").write_text("hello", encoding="utf-8")
         files = scan_convos(str(tmp_path))
         assert len(files) == 1
+
+    def test_scan_skips_tool_results_dir(self, tmp_path):
+        # Regression for self-u7o: Claude Code spills oversize tool
+        # outputs (Supabase dumps, MCP responses) into a tool-results/
+        # subdir. The parent transcript already cites them, so mining
+        # them again just produces megablob drawers.
+        tr = tmp_path / "tool-results"
+        tr.mkdir()
+        (tr / "supabase-dump.txt").write_text("INSERT INTO foo VALUES (1);" * 10000)
+        (tmp_path / "session.jsonl").write_text(
+            '{"role":"user","content":"hi"}\n', encoding="utf-8"
+        )
+        files = scan_convos(str(tmp_path))
+        names = [f.name for f in files]
+        assert "session.jsonl" in names
+        assert "supabase-dump.txt" not in names
 
     def test_scan_skips_meta_json(self, tmp_path):
         (tmp_path / "chat.meta.json").write_text("{}", encoding="utf-8")

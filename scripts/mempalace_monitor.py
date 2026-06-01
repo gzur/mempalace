@@ -30,6 +30,11 @@ from pathlib import Path
 STATE_DIR = Path.home() / ".mempalace"
 STATE_FILE = STATE_DIR / "monitor_state.json"
 LOG_FILE = STATE_DIR / "logs" / "monitor.log"
+MAINTENANCE_FLAG = STATE_DIR / "MAINTENANCE"
+# Warn once if a planned-outage flag has been left in place this long —
+# anything legitimate (repair, HNSW rebuild, manual bootout) finishes in
+# minutes. A flag past this threshold is almost certainly forgotten.
+STALE_FLAG_HOURS = 6.0
 
 
 def _log(line: str) -> None:
@@ -134,12 +139,57 @@ def _file_bead(check) -> None:
         _log(f"bd create rc={out.returncode} stderr={out.stderr.strip()[:200]}")
 
 
+def _maintenance_status() -> tuple[bool, float | None]:
+    """Return (suppressed, age_hours).
+
+    ``suppressed`` is True when ``~/.mempalace/MAINTENANCE`` exists. The
+    second value is the flag's age in hours (None when no flag is set),
+    so callers can decide whether to surface a "stale flag" warning.
+    """
+    try:
+        st = MAINTENANCE_FLAG.stat()
+    except FileNotFoundError:
+        return False, None
+    except OSError as e:
+        _log(f"maintenance flag stat failed: {e}")
+        return False, None
+    age_hours = max(0.0, (time.time() - st.st_mtime) / 3600.0)
+    return True, age_hours
+
+
 def main() -> int:
     # Add the repo to sys.path so the script works regardless of how launchd
     # spawns it (the .mempalace-env python is the canonical interpreter).
     repo_root = Path(__file__).resolve().parent.parent
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
+
+    suppressed, age_hours = _maintenance_status()
+    if suppressed:
+        state = _load_state()
+        stale = age_hours is not None and age_hours >= STALE_FLAG_HOURS
+        prev_stale = state.get("_maintenance_stale") == "true"
+        if stale and not prev_stale:
+            # Edge-fire once per stale period — don't re-page every 5
+            # minutes after the flag crosses the threshold.
+            _notify(
+                "MemPalace: stale maintenance flag",
+                f"~/.mempalace/MAINTENANCE has been in place for "
+                f"{age_hours:.1f}h. Remove it or monitoring stays off.",
+            )
+            _log(
+                f"maintenance: stale flag warn ({age_hours:.1f}h); "
+                f"remove {MAINTENANCE_FLAG} to resume checks"
+            )
+        else:
+            _log(
+                f"maintenance: suppressed (flag age {age_hours:.2f}h)"
+                if age_hours is not None
+                else "maintenance: suppressed"
+            )
+        state["_maintenance_stale"] = "true" if stale else "false"
+        _save_state(state)
+        return 0
 
     try:
         from mempalace.health import FAIL, OK, WARN, overall_status, run_checks

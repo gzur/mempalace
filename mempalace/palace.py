@@ -41,6 +41,11 @@ SKIP_DIRS = {
     ".eggs",
     "htmlcov",
     "target",
+    # Claude Code spills oversize tool outputs (Supabase dumps, MCP
+    # responses) into this subdir. The parent transcript already cites
+    # them by reference; mining them again produces multi-MB megablob
+    # drawers without adding signal.
+    "tool-results",
 }
 
 _DEFAULT_BACKEND = ChromaBackend()

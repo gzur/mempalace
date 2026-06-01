@@ -153,14 +153,6 @@ function Dashboard() {
           )}
         </div>
       </section>
-
-      <p className="text-[11px] text-[color:var(--color-muted)]">
-        Need the old UI?{" "}
-        <a href="/ui/" className="hover:underline">
-          /ui/
-        </a>{" "}
-        is still live until the rewrite reaches parity.
-      </p>
     </div>
   );
 }

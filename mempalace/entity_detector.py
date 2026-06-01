@@ -121,6 +121,11 @@ SKIP_DIRS = {
     ".terraform",
     "vendor",
     "target",
+    # Claude Code spills oversize tool outputs (Supabase dumps, MCP
+    # responses) into this subdir. The parent transcript already cites
+    # them by reference; mining them again produces multi-MB megablob
+    # drawers without adding signal.
+    "tool-results",
 }
 
 # Files whose content is boilerplate prose — poisons entity detection.

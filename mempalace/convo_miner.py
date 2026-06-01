@@ -182,8 +182,19 @@ def _chunk_by_paragraph(content: str) -> list:
         return chunks
 
     for para in paragraphs:
-        if len(para) > MIN_CHUNK_SIZE:
-            chunks.append({"content": para, "chunk_index": len(chunks)})
+        if len(para) <= MIN_CHUNK_SIZE:
+            continue
+        # Hard size cap. Single-paragraph blobs (SQL dumps, JSON
+        # responses, base64 attachments) used to land as one drawer of
+        # arbitrary size — splitting them keeps the index usable and
+        # bounds HNSW/sqlite cost per source file.
+        if len(para) > CHUNK_SIZE:
+            for start in range(0, len(para), CHUNK_SIZE):
+                part = para[start : start + CHUNK_SIZE]
+                if len(part.strip()) > MIN_CHUNK_SIZE:
+                    chunks.append({"content": part, "chunk_index": len(chunks)})
+            continue
+        chunks.append({"content": para, "chunk_index": len(chunks)})
 
     return chunks
 
