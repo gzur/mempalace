@@ -579,6 +579,53 @@ def hnsw_capacity_status(palace_path: str, collection_name: str = "mempalace_dra
     return out
 
 
+def refuse_if_diverged(
+    palace_path: str,
+    collection_name: str,
+    op_name: str,
+    wal_log: Optional[Any] = None,
+) -> Optional[dict]:
+    """Shared capacity-divergence guard for write paths.
+
+    Probes ``hnsw_capacity_status`` and, when divergence is detected,
+    returns a structured refusal dict the caller should propagate to its
+    user. The HTTP daemon (``mcp_server._refuse_write_if_diverged``)
+    enforces this rule from a cached flag for performance; subprocess
+    writers (``miner``, ``convo_miner``) call this helper directly so
+    they don't bypass the same guard and segfault on a capacity-divergent
+    HNSW. See bead self-rob.
+
+    ``op_name`` is the human label included in the refusal payload and
+    in the WAL entry (e.g. ``"mine"``, ``"mine_convos"``). When
+    ``wal_log`` is supplied, a ``"<op>_refused"`` entry is appended; we
+    swallow logging errors so a broken WAL never converts a refusal
+    into a crash.
+    """
+    info = hnsw_capacity_status(palace_path, collection_name)
+    if not info.get("diverged"):
+        return None
+    reason = info.get("message", "")
+    if wal_log is not None:
+        try:
+            wal_log(
+                f"{op_name}_refused",
+                {"reason": reason},
+                {"success": False, "vector_disabled": True},
+            )
+        except Exception:
+            logger.debug("WAL log of refusal failed", exc_info=True)
+    return {
+        "success": False,
+        "error": (
+            f"{op_name} refused: vector index is in capacity-divergence state. "
+            f"{reason} Run `mempalace repair` to restore writes."
+        ),
+        "vector_disabled": True,
+        "vector_disabled_reason": reason,
+        "capacity_status": info,
+    }
+
+
 def _sqlite_embedding_count(palace_path: str, collection_name: str) -> Optional[int]:
     """Count rows in chroma.sqlite3.embeddings for ``collection_name``.
 

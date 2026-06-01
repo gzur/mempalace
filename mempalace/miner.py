@@ -19,6 +19,7 @@ from datetime import datetime
 from collections import defaultdict
 from typing import Optional
 
+from .backends.chroma import refuse_if_diverged
 from .palace import (
     NORMALIZE_VERSION,
     SKIP_DIRS,
@@ -1024,6 +1025,22 @@ def scan_project(
 # =============================================================================
 
 
+def _capacity_refused(palace_path: str, op_name: str) -> bool:
+    """Share the HNSW capacity-divergence guard with the HTTP daemon —
+    see bead self-rob. Returns True after printing the refusal so callers
+    can early-return without writing.
+    """
+    try:
+        from .mcp_server import _wal_log
+    except Exception:
+        _wal_log = None
+    refused = refuse_if_diverged(palace_path, "mempalace_drawers", op_name, wal_log=_wal_log)
+    if refused is None:
+        return False
+    print(f"\n  Mine refused: {refused['error']}", file=sys.stderr)
+    return True
+
+
 def mine(
     project_dir: str,
     palace_path: str,
@@ -1119,6 +1136,8 @@ def _mine_impl(
     print(f"{'-' * 55}\n")
 
     if not dry_run:
+        if _capacity_refused(palace_path, "mine"):
+            return
         collection = get_collection(palace_path)
         closets_col = get_closets_collection(palace_path)
     else:

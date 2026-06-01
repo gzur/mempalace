@@ -16,6 +16,7 @@ from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
 
+from .backends.chroma import refuse_if_diverged
 from .normalize import normalize
 from .palace import (
     NORMALIZE_VERSION,
@@ -390,6 +391,22 @@ def _file_chunks_locked(collection, source_file, chunks, wing, room, agent, extr
     return drawers_added, room_counts_delta, False
 
 
+def _capacity_refused(palace_path: str, op_name: str) -> bool:
+    """Share the HNSW capacity-divergence guard with the HTTP daemon —
+    see bead self-rob. Returns True after printing the refusal so callers
+    can early-return without writing.
+    """
+    try:
+        from .mcp_server import _wal_log
+    except Exception:
+        _wal_log = None
+    refused = refuse_if_diverged(palace_path, "mempalace_drawers", op_name, wal_log=_wal_log)
+    if refused is None:
+        return False
+    print(f"\n  Mine refused: {refused['error']}", file=sys.stderr)
+    return True
+
+
 def mine_convos(
     convo_dir: str,
     palace_path: str,
@@ -426,6 +443,9 @@ def mine_convos(
     if dry_run:
         print("  DRY RUN — nothing will be filed")
     print(f"{'-' * 55}\n")
+
+    if not dry_run and _capacity_refused(palace_path, "mine_convos"):
+        return
 
     collection = get_collection(palace_path) if not dry_run else None
 
