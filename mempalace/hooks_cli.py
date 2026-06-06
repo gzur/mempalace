@@ -1130,15 +1130,19 @@ def hook_user_prompt_submit(data: dict, harness: str):
 
     # ── Gate checks (fast-fail) ───────────────────────────────────────
     if prompt.startswith("/"):
+        _log("user-prompt-submit: skip (meta-command)")
         _output({})
         return
     if len(prompt.split()) < 3:
+        _log("user-prompt-submit: skip (short prompt)")
         _output({})
         return
     if _cwd_opted_out(cwd):
+        _log(f"user-prompt-submit: skip (opted out): {cwd}")
         _output({})
         return
     if not _cwd_has_mempalace_mcp(cwd):
+        _log(f"user-prompt-submit: skip (no mempalace MCP): {cwd}")
         _output({})
         return
 
@@ -1154,9 +1158,11 @@ def hook_user_prompt_submit(data: dict, harness: str):
     ][:_MAX_CANDIDATES]
 
     if not candidates:
+        _log(f"user-prompt-submit: empty (search returned {len(results)}, none above threshold)")
         _output({})
         return
 
+    _log(f"user-prompt-submit: matched {len(candidates)} candidates for {cwd}")
     _output({"additionalContext": _format_smoke_signal(candidates)})
 
 
