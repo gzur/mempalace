@@ -123,6 +123,7 @@ def _hybrid_rank(
     query: str,
     vector_weight: float = 0.6,
     bm25_weight: float = 0.4,
+    distance_key: str = "distance",
 ) -> list:
     """Re-rank ``results`` by a convex combination of vector similarity and BM25.
 
@@ -139,6 +140,12 @@ def _hybrid_rank(
     Used by candidate-union mode to merge BM25-only candidates that the
     vector index didn't surface.
 
+    ``distance_key`` selects which field carries the cosine distance. The
+    default ``"distance"`` is the raw HNSW distance; callers can pass
+    ``"effective_distance"`` to fold in the closet-rank boost so the
+    vector component honours the same signal the over-fetch sort uses. A
+    candidate missing that key falls back to raw ``"distance"``.
+
     Mutates each result dict to add ``bm25_score`` and reorders the list
     in place. Returns the same list for convenience.
     """
@@ -152,7 +159,9 @@ def _hybrid_rank(
 
     scored = []
     for r, raw, norm in zip(results, bm25_raw, bm25_norm):
-        distance = r.get("distance")
+        distance = r.get(distance_key)
+        if distance is None:
+            distance = r.get("distance")
         if distance is None:
             vec_sim = 0.0
         else:
@@ -700,6 +709,91 @@ _CANDIDATE_MERGERS = {
 }
 
 
+def _rank_pool_and_truncate(scored: list, query: str, n_results: int) -> list:
+    """Hybrid-rank the FULL over-fetched pool then truncate to ``n_results``.
+
+    Previously the pool was vector-sorted and cut to ``n_results`` here, so
+    the downstream :func:`_hybrid_rank` could only reorder within the
+    already-truncated top-N — a drawer with strong keyword signal that
+    vector ranked deep in the pool (e.g. narrative content the embedding
+    under-weights) could never reach the returned set. Ranking the whole
+    pool first lets BM25 pull such a drawer up before truncation.
+
+    ``effective_distance`` keeps the closet-rank boost in the vector term;
+    ``_sort_key`` survives as a stable tie-breaker for equal hybrid scores.
+    Extracted to a helper to keep ``search_memories`` under the C901
+    complexity ceiling.
+    """
+    scored.sort(key=lambda h: h["_sort_key"])
+    _hybrid_rank(scored, query, distance_key="effective_distance")
+    return scored[:n_results]
+
+
+def _hydrate_closet_neighbors(hits: list, drawers_col, query: str) -> None:
+    """Replace each closet-boosted hit's text with the keyword-best chunk
+    plus its immediate neighbors from the same source file.
+
+    A closet hit returns one drawer, but vector may have landed on the wrong
+    chunk within a multi-drawer source; the closet only said "this source is
+    relevant". For each ``drawer+closet`` hit we fetch all sibling chunks,
+    pick the one with the most query-term overlap, and expand to a ±1 window
+    (capped at ``MAX_HYDRATION_CHARS``). Drawer-only hits are left untouched.
+
+    Mutates ``hits`` in place. Extracted from :func:`search_memories` to keep
+    it under the C901 complexity ceiling; behavior is unchanged.
+    """
+    MAX_HYDRATION_CHARS = 10000
+    for h in hits:
+        if h["matched_via"] == "drawer":
+            continue
+        full_source = h.get("_source_file_full") or ""
+        if not full_source:
+            continue
+        try:
+            source_drawers = drawers_col.get(
+                where={"source_file": full_source},
+                include=["documents", "metadatas"],
+            )
+        except Exception:
+            logger.debug("Neighbor fetch failed for %s", full_source, exc_info=True)
+            continue
+        docs = source_drawers.documents
+        metas_ = source_drawers.metadatas
+        if len(docs) <= 1:
+            continue
+
+        # Sort by chunk_index so best_idx + neighbors are positional.
+        indexed = []
+        for idx, (d, m) in enumerate(zip(docs, metas_)):
+            ci = m.get("chunk_index", idx) if isinstance(m, dict) else idx
+            if not isinstance(ci, int):
+                ci = idx
+            indexed.append((ci, d))
+        indexed.sort(key=lambda p: p[0])
+        ordered_docs = [d for _, d in indexed]
+
+        query_terms = set(_tokenize(query))
+        best_idx, best_score = 0, -1
+        for idx, d in enumerate(ordered_docs):
+            d_lower = d.lower()
+            s = sum(1 for t in query_terms if t in d_lower)
+            if s > best_score:
+                best_score, best_idx = s, idx
+
+        start = max(0, best_idx - 1)
+        end = min(len(ordered_docs), best_idx + 2)
+        expanded = "\n\n".join(ordered_docs[start:end])
+        if len(expanded) > MAX_HYDRATION_CHARS:
+            expanded = (
+                expanded[:MAX_HYDRATION_CHARS]
+                + f"\n\n[...truncated. {len(ordered_docs)} total drawers. "
+                "Use mempalace_get_drawer for full content.]"
+            )
+        h["text"] = expanded
+        h["drawer_index"] = best_idx
+        h["total_drawers"] = len(ordered_docs)
+
+
 def _validate_candidate_strategy(strategy: str) -> None:
     """Raise ``ValueError`` for unknown strategies.
 
@@ -958,8 +1052,7 @@ def search_memories(
             entry["closet_preview"] = closet_preview
         scored.append(entry)
 
-    scored.sort(key=lambda h: h["_sort_key"])
-    hits = scored[:n_results]
+    hits = _rank_pool_and_truncate(scored, query, n_results)
 
     # Drawer-grep enrichment: for closet-boosted hits whose source has
     # multiple drawers, return the keyword-best chunk + its immediate
@@ -1038,8 +1131,10 @@ def search_memories(
     # to the requested size. Without the trim, ``candidate_strategy="union"``
     # would return up to 4× ``n_results`` (vector hits + BM25 union pool),
     # breaking the existing ``search_memories`` size contract that the MCP
-    # ``limit`` parameter is built on.
-    hits = _hybrid_rank(hits, query)[:n_results]
+    # ``limit`` parameter is built on. Uses the same closet-aware distance
+    # as the pre-truncation rank above; union BM25-only candidates lack
+    # ``effective_distance`` and fall back to raw distance (None → BM25-only).
+    hits = _hybrid_rank(hits, query, distance_key="effective_distance")[:n_results]
     for h in hits:
         h.pop("_sort_key", None)
         h.pop("_source_file_full", None)
