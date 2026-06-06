@@ -1163,7 +1163,17 @@ def hook_user_prompt_submit(data: dict, harness: str):
         return
 
     _log(f"user-prompt-submit: matched {len(candidates)} candidates for {cwd}")
-    _output({"additionalContext": _format_smoke_signal(candidates)})
+    # Claude Code only honors injected context under the nested
+    # hookSpecificOutput envelope; a bare top-level "additionalContext"
+    # parses cleanly but is silently dropped.
+    _output(
+        {
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": _format_smoke_signal(candidates),
+            }
+        }
+    )
 
 
 def run_hook(hook_name: str, harness: str):

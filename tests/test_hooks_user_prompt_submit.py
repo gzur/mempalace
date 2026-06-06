@@ -272,13 +272,47 @@ def test_happy_path_emits_smoke_signal(
 
     payload = captured_output["payload"]
     assert payload is not None
-    assert "additionalContext" in payload
-    block = payload["additionalContext"]
+    block = payload["hookSpecificOutput"]["additionalContext"]
     assert "drawer_notes_journal_4a8b" in block
     assert "drawer_notes_meeting_notes_d642" in block
     # Sub-threshold candidate must NOT appear.
     assert "drawer_low_relevance" not in block
     assert "2 candidates" in block
+
+
+def test_happy_path_uses_hook_specific_output_envelope(
+    stub_palace_root, cwd_with_mempalace, captured_output, monkeypatch
+):
+    """Regression: Claude Code silently drops a bare top-level
+    ``additionalContext``. The injection must be nested under
+    ``hookSpecificOutput`` with ``hookEventName == "UserPromptSubmit"``
+    or the smoke signal never reaches the main session."""
+    monkeypatch.setattr(
+        hooks_cli,
+        "_palace_search",
+        lambda *_a, **_kw: [
+            {
+                "drawer_id": "drawer_notes_journal_4a8b",
+                "wing": "notes",
+                "room": "journal",
+                "source_file": "2026-01-01-entry.md",
+                "similarity": 0.48,
+            },
+        ],
+    )
+
+    hooks_cli.hook_user_prompt_submit(
+        {"prompt": "what did Alice say about planning", "cwd": "/Users/gzur/repos/notes"},
+        "claude-code",
+    )
+
+    payload = captured_output["payload"]
+    assert payload is not None
+    # No bare top-level key — that shape is silently dropped.
+    assert "additionalContext" not in payload
+    hook_output = payload["hookSpecificOutput"]
+    assert hook_output["hookEventName"] == "UserPromptSubmit"
+    assert "drawer_notes_journal_4a8b" in hook_output["additionalContext"]
 
 
 def test_empty_match_emits_empty_json(
@@ -338,7 +372,7 @@ def test_caps_at_max_candidates(stub_palace_root, cwd_with_mempalace, captured_o
     )
     payload = captured_output["payload"]
     assert payload is not None
-    block = payload["additionalContext"]
+    block = payload["hookSpecificOutput"]["additionalContext"]
     assert f"{hooks_cli._MAX_CANDIDATES} candidates" in block
     # Beyond the cap should NOT appear.
     assert f"drawer_{hooks_cli._MAX_CANDIDATES}" not in block
