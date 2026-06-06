@@ -995,6 +995,171 @@ def hook_precompact(data: dict, harness: str):
     _output({})
 
 
+# ── UserPromptSubmit hook (self-d1t) ──────────────────────────────────
+# Tiny smoke-signal injection: every user prompt is pre-processed by a
+# fast deterministic mempalace search. When high-similarity matches
+# exist we inject a ~50-80 token block listing 0-5 candidate drawer IDs
+# with their source attribution; the main session decides whether to
+# follow up via mempalace_get_drawer. The hook itself NEVER injects
+# drawer content. No LLM call, no API spend.
+
+_OPT_OUT_PATH = PALACE_ROOT / "hook_opt_out.json"
+_DAEMON_URL = "http://127.0.0.1:9876"
+_SEARCH_LIMIT = 8
+_SIMILARITY_THRESHOLD = 0.40
+_MAX_CANDIDATES = 5
+_HTTP_TIMEOUT_S = 2.0
+
+
+def _cwd_opted_out(cwd: str) -> bool:
+    """True when ``cwd`` is in ``~/.mempalace/hook_opt_out.json``."""
+    try:
+        raw = _OPT_OUT_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return False
+    disabled = data.get("disabled_cwds") if isinstance(data, dict) else None
+    if not isinstance(disabled, list):
+        return False
+    normalized = os.path.abspath(cwd)
+    return any(isinstance(d, str) and os.path.abspath(d) == normalized for d in disabled)
+
+
+def _cwd_has_mempalace_mcp(cwd: str, config_path: Path = _CLAUDE_CONFIG_PATH) -> bool:
+    """True when Claude Code can reach mempalace from ``cwd``.
+
+    Mirrors ``_ensure_client_header``'s resolution: check
+    ``projects.<cwd>.mcpServers.mempalace`` first, fall back to the
+    GLOBAL ``mcpServers.mempalace`` if a per-project override isn't
+    explicitly set. Most users have mempalace wired only at the global
+    level; per-project entries get seeded on demand by SessionStart.
+    """
+    try:
+        cfg = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(cfg, dict):
+        return False
+    projects = cfg.get("projects")
+    if isinstance(projects, dict):
+        project = projects.get(cwd)
+        if isinstance(project, dict):
+            mcp = project.get("mcpServers")
+            if isinstance(mcp, dict) and isinstance(mcp.get("mempalace"), dict):
+                return True
+    # Fall back to the global mcpServers entry. The daemon is reachable
+    # from anywhere on loopback once the global config points to it.
+    global_mcp = cfg.get("mcpServers")
+    return isinstance(global_mcp, dict) and isinstance(global_mcp.get("mempalace"), dict)
+
+
+def _palace_search(query: str, client_tag: str) -> list[dict]:
+    """Hit the local daemon's /api/v1/search and return results.
+
+    Never raises. Returns ``[]`` on any failure so the hook fails open.
+    """
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    params = urllib.parse.urlencode({"q": query, "limit": _SEARCH_LIMIT})
+    url = f"{_DAEMON_URL}/api/v1/search?{params}"
+    req = urllib.request.Request(url, headers={_CLIENT_HEADER: client_tag})
+    try:
+        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT_S) as r:
+            payload = json.loads(r.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, TimeoutError, json.JSONDecodeError):
+        return []
+    if not isinstance(payload, dict):
+        return []
+    results = payload.get("results")
+    return results if isinstance(results, list) else []
+
+
+def _format_smoke_signal(candidates: list[dict]) -> str:
+    """Render the ~50-80 token candidate-locator block."""
+    lines = [f"[palace: {len(candidates)} candidates may be relevant to this prompt"]
+    for c in candidates:
+        drawer_id = c.get("drawer_id", "?")
+        wing = c.get("wing", "?")
+        room = c.get("room", "?")
+        source = c.get("source_file", "?")
+        sim = c.get("similarity")
+        sim_str = f"{sim:.2f}" if isinstance(sim, (int, float)) else "?"
+        lines.append(f" - {drawer_id} · {wing}/{room}/{source} · sim {sim_str}")
+    lines.append("Call mempalace_get_drawer with an ID to read in full.]")
+    return "\n".join(lines)
+
+
+def hook_user_prompt_submit(data: dict, harness: str):
+    """UserPromptSubmit hook: inject a candidate-locator smoke signal.
+
+    Reads the user's prompt from stdin JSON, runs a fast HTTP search
+    against the local daemon, filters to high-similarity matches, and
+    emits ``additionalContext`` with 0-5 drawer locators. The main
+    session decides whether to follow up via mempalace_get_drawer.
+
+    Fails open: any error (daemon down, malformed input, timeout) →
+    emit ``{}`` and exit silently. The hook NEVER blocks a prompt.
+    """
+    if not _palace_root_exists():
+        _output({})
+        return
+    if harness not in SUPPORTED_HARNESSES:
+        _output({})
+        return
+
+    # Prompt can arrive under either key depending on harness version.
+    prompt = data.get("prompt") or data.get("user_prompt") or ""
+    if not isinstance(prompt, str):
+        _output({})
+        return
+    prompt = prompt.strip()
+
+    # cwd: prefer the harness-provided value, fall back to the
+    # subprocess's own cwd (set by the harness when it spawned us).
+    cwd_raw = data.get("cwd") or data.get("working_directory") or ""
+    if not isinstance(cwd_raw, str) or not cwd_raw:
+        cwd_raw = os.getcwd()
+    cwd = os.path.abspath(cwd_raw)
+
+    # ── Gate checks (fast-fail) ───────────────────────────────────────
+    if prompt.startswith("/"):
+        _output({})
+        return
+    if len(prompt.split()) < 3:
+        _output({})
+        return
+    if _cwd_opted_out(cwd):
+        _output({})
+        return
+    if not _cwd_has_mempalace_mcp(cwd):
+        _output({})
+        return
+
+    # ── Search + filter ──────────────────────────────────────────────
+    client_tag = _client_tag_for_cwd(cwd)
+    results = _palace_search(prompt, client_tag)
+    candidates = [
+        r
+        for r in results
+        if isinstance(r, dict)
+        and isinstance(r.get("similarity"), (int, float))
+        and r["similarity"] > _SIMILARITY_THRESHOLD
+    ][:_MAX_CANDIDATES]
+
+    if not candidates:
+        _output({})
+        return
+
+    _output({"additionalContext": _format_smoke_signal(candidates)})
+
+
 def run_hook(hook_name: str, harness: str):
     """Main entry point: read stdin JSON, dispatch to hook handler."""
     try:
@@ -1007,6 +1172,7 @@ def run_hook(hook_name: str, harness: str):
         "session-start": hook_session_start,
         "stop": hook_stop,
         "precompact": hook_precompact,
+        "user-prompt-submit": hook_user_prompt_submit,
     }
 
     handler = hooks.get(hook_name)
