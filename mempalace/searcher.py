@@ -1055,60 +1055,9 @@ def search_memories(
     hits = _rank_pool_and_truncate(scored, query, n_results)
 
     # Drawer-grep enrichment: for closet-boosted hits whose source has
-    # multiple drawers, return the keyword-best chunk + its immediate
-    # neighbors instead of just the drawer vector search landed on. The
-    # closet said "this source is relevant"; vector may have picked the
-    # wrong chunk within it; grep picks the right one.
-    MAX_HYDRATION_CHARS = 10000
-    for h in hits:
-        if h["matched_via"] == "drawer":
-            continue
-        full_source = h.get("_source_file_full") or ""
-        if not full_source:
-            continue
-        try:
-            source_drawers = drawers_col.get(
-                where={"source_file": full_source},
-                include=["documents", "metadatas"],
-            )
-        except Exception:
-            logger.debug("Neighbor fetch failed for %s", full_source, exc_info=True)
-            continue
-        docs = source_drawers.documents
-        metas_ = source_drawers.metadatas
-        if len(docs) <= 1:
-            continue
-
-        # Sort by chunk_index so best_idx + neighbors are positional.
-        indexed = []
-        for idx, (d, m) in enumerate(zip(docs, metas_)):
-            ci = m.get("chunk_index", idx) if isinstance(m, dict) else idx
-            if not isinstance(ci, int):
-                ci = idx
-            indexed.append((ci, d))
-        indexed.sort(key=lambda p: p[0])
-        ordered_docs = [d for _, d in indexed]
-
-        query_terms = set(_tokenize(query))
-        best_idx, best_score = 0, -1
-        for idx, d in enumerate(ordered_docs):
-            d_lower = d.lower()
-            s = sum(1 for t in query_terms if t in d_lower)
-            if s > best_score:
-                best_score, best_idx = s, idx
-
-        start = max(0, best_idx - 1)
-        end = min(len(ordered_docs), best_idx + 2)
-        expanded = "\n\n".join(ordered_docs[start:end])
-        if len(expanded) > MAX_HYDRATION_CHARS:
-            expanded = (
-                expanded[:MAX_HYDRATION_CHARS]
-                + f"\n\n[...truncated. {len(ordered_docs)} total drawers. "
-                "Use mempalace_get_drawer for full content.]"
-            )
-        h["text"] = expanded
-        h["drawer_index"] = best_idx
-        h["total_drawers"] = len(ordered_docs)
+    # multiple drawers, swap in the keyword-best chunk + its immediate
+    # neighbors instead of the drawer vector search happened to land on.
+    _hydrate_closet_neighbors(hits, drawers_col, query)
 
     # Candidate strategy hook: optionally widen the rerank pool's *source*
     # before ranking. Default ("vector") is a no-op; "union" merges top-K

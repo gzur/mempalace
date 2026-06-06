@@ -196,6 +196,96 @@ class TestSearchMemories:
         assert hits[0]["source_file"] == "a.md"
         assert hits[0]["matched_via"] == "drawer+closet"
 
+    def test_bm25_strong_drawer_deep_in_pool_survives_truncation(self):
+        """A keyword-rich drawer that vector ranks *beyond* ``n_results``
+        must still reach the returned set via the hybrid re-rank.
+
+        Regression for the truncate-then-hybridize bug: the pool used to be
+        vector-sorted and cut to ``n_results`` *before* ``_hybrid_rank`` ran,
+        so a drawer with dominant BM25 signal sitting deep in the over-fetch
+        pool (vector-distant, e.g. narrative content the embedding under-
+        weights) was discarded before BM25 could lift it. Ranking the whole
+        pool first fixes this.
+
+        Setup: four keyword-poor distractors with *small* vector distance and
+        one keyword-rich target (every query term, repeated) with *large*
+        vector distance. With ``n_results=2`` the old truncate-first path
+        would keep two distractors and drop the target entirely.
+        """
+        drawers_col = MagicMock()
+        drawers_col.query.return_value = {
+            "documents": [
+                [
+                    "alpha beta gamma delta",
+                    "epsilon zeta eta theta",
+                    "iota kappa lambda mu",
+                    "nu xi omicron pi",
+                    # Target: dominates BM25, but vector-distant.
+                    "kafka rebalance timeout kafka rebalance timeout",
+                ]
+            ],
+            "metadatas": [
+                [
+                    {"source_file": "d1.md", "wing": "w", "room": "r", "chunk_index": 0},
+                    {"source_file": "d2.md", "wing": "w", "room": "r", "chunk_index": 0},
+                    {"source_file": "d3.md", "wing": "w", "room": "r", "chunk_index": 0},
+                    {"source_file": "d4.md", "wing": "w", "room": "r", "chunk_index": 0},
+                    {"source_file": "target.md", "wing": "w", "room": "r", "chunk_index": 0},
+                ]
+            ],
+            # Distractors are vector-close; target is vector-far (rank last).
+            "distances": [[0.50, 0.52, 0.54, 0.56, 0.70]],
+            "ids": [["d1", "d2", "d3", "d4", "target"]],
+        }
+
+        def mock_get_collection(path, collection_name=None, create=False):
+            if not hasattr(mock_get_collection, "_called"):
+                mock_get_collection._called = True
+                return drawers_col
+            raise RuntimeError("no closets")  # degrade to drawer-only
+
+        with patch("mempalace.searcher.get_collection", side_effect=mock_get_collection):
+            result = search_memories("kafka rebalance timeout", "/fake/path", n_results=2)
+
+        sources = [h["source_file"] for h in result["results"]]
+        # The vector-deep, keyword-rich drawer must survive into the top-2.
+        assert "target.md" in sources, (
+            "BM25-dominant drawer at vector rank 5 was dropped before the "
+            "hybrid re-rank — truncation is happening before hybridization."
+        )
+        # And it should lead: its hybrid score beats the keyword-poor distractors.
+        assert result["results"][0]["source_file"] == "target.md"
+
+
+class TestHybridRankDistanceKey:
+    """``_hybrid_rank`` can score the vector term off an alternate field."""
+
+    def test_distance_key_selects_effective_distance(self):
+        from mempalace.searcher import _hybrid_rank
+
+        # Same raw distance, but effective_distance (closet-boosted) differs.
+        # With distance_key="effective_distance", the lower-effective-distance
+        # item wins on the vector term; BM25 is equal (identical text).
+        results = [
+            {"text": "shared tokens", "distance": 0.5, "effective_distance": 0.5},
+            {"text": "shared tokens", "distance": 0.5, "effective_distance": 0.1},
+        ]
+        _hybrid_rank(results, "shared tokens", distance_key="effective_distance")
+        assert results[0]["effective_distance"] == 0.1
+
+    def test_missing_distance_key_falls_back_to_raw_distance(self):
+        from mempalace.searcher import _hybrid_rank
+
+        # No effective_distance present → falls back to "distance"; the
+        # nearer raw-distance item ranks first. Mirrors union BM25-only
+        # candidates, which carry no effective_distance.
+        results = [
+            {"text": "shared tokens", "distance": 0.6},
+            {"text": "shared tokens", "distance": 0.2},
+        ]
+        _hybrid_rank(results, "shared tokens", distance_key="effective_distance")
+        assert results[0]["distance"] == 0.2
+
 
 # ── BM25 internals: None / empty document safety ─────────────────────
 
