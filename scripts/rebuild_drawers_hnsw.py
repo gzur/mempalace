@@ -156,6 +156,15 @@ def main() -> None:
     print(f"skipped (no document body): {max(0, skipped_no_doc)}")
     print(f"chromadb post-rebuild count: {post}")
 
+    # Force a full HNSW persist before exit. Relying on process teardown only
+    # flushed to the last hnsw:sync_threshold boundary, silently dropping the
+    # sub-threshold tail (~750 drawers on the 2026-06-06 incident) into
+    # embeddings_queue — which the daemon's live consumer will NOT backfill,
+    # leaving the vector index short. Stopping the system persists all
+    # segments. See scripts/topup_drawers_hnsw.py for the recovery path.
+    client._system.stop()
+    print("system stopped — HNSW flush forced")
+
 
 if __name__ == "__main__":
     main()
