@@ -15,11 +15,15 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import contextvars
+import hmac
 import logging
+import os
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse, Response
 from starlette.routing import Mount, Route
@@ -246,6 +250,34 @@ class _SPAStaticFiles(StaticFiles):
         return response
 
 
+# Paths that the bearer-token gate protects when MEMPALACE_TOKEN is set.
+# Everything else (/, /healthz, /ui redirects, /app static) stays open:
+# /healthz is a no-secret liveness probe the launchd monitor polls, and the
+# SPA shell itself carries no palace data (its /api/v1 fetches ARE gated).
+_PROTECTED_PREFIXES = ("/mcp", "/api/v1")
+
+
+class _TokenAuthMiddleware(BaseHTTPMiddleware):
+    """Reject requests to data surfaces that lack the shared bearer token.
+
+    No-op unless ``MEMPALACE_TOKEN`` is set in the daemon's environment, so
+    default local-only installs (loopback bind, no token) are unaffected.
+    When the token IS set — the remote-access posture, daemon bound to a
+    ZeroTier IP — every ``/mcp`` and ``/api/v1`` request must present
+    ``Authorization: Bearer <token>``. Network membership (ZeroTier) plus this
+    token are the two independent access layers; see the two-machine plan.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        token = os.environ.get("MEMPALACE_TOKEN")
+        if token and request.url.path.startswith(_PROTECTED_PREFIXES):
+            expected = f"Bearer {token}"
+            got = request.headers.get("Authorization", "")
+            if not hmac.compare_digest(got, expected):
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+        return await call_next(request)
+
+
 def build_app() -> Starlette:
     routes: list = [
         Route("/", root, methods=["GET"]),
@@ -268,4 +300,4 @@ def build_app() -> Starlette:
                 name="spa",
             )
         )
-    return Starlette(routes=routes)
+    return Starlette(routes=routes, middleware=[Middleware(_TokenAuthMiddleware)])

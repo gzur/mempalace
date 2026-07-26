@@ -139,6 +139,52 @@ class TestSessionIdThreading:
         assert captured["added_by"] == "mcp"
 
 
+class TestTokenAuth:
+    """MEMPALACE_TOKEN-gated bearer auth on the data surfaces (/mcp, /api/v1)."""
+
+    def _initialize(self, client, **kwargs):
+        return client.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            **kwargs,
+        )
+
+    def test_no_token_env_is_unauthenticated(self, client, monkeypatch):
+        """Backward compat: no MEMPALACE_TOKEN → /mcp works without any header."""
+        monkeypatch.delenv("MEMPALACE_TOKEN", raising=False)
+        r = self._initialize(client)
+        assert r.status_code == 200
+
+    def test_protected_path_rejects_missing_token(self, client, monkeypatch):
+        monkeypatch.setenv("MEMPALACE_TOKEN", "s3cret")
+        r = self._initialize(client)
+        assert r.status_code == 401
+        assert r.json()["error"] == "unauthorized"
+
+    def test_protected_path_rejects_wrong_token(self, client, monkeypatch):
+        monkeypatch.setenv("MEMPALACE_TOKEN", "s3cret")
+        r = self._initialize(client, headers={"Authorization": "Bearer nope"})
+        assert r.status_code == 401
+
+    def test_protected_path_accepts_correct_token(self, client, monkeypatch):
+        monkeypatch.setenv("MEMPALACE_TOKEN", "s3cret")
+        r = self._initialize(client, headers={"Authorization": "Bearer s3cret"})
+        assert r.status_code == 200
+        assert r.json()["result"]["serverInfo"]["name"] == "mempalace"
+
+    def test_api_prefix_is_gated(self, client, monkeypatch):
+        """/api/v1/* is rejected in middleware before reaching the route."""
+        monkeypatch.setenv("MEMPALACE_TOKEN", "s3cret")
+        r = client.get("/api/v1/palace/summary")
+        assert r.status_code == 401
+
+    def test_healthz_stays_open_with_token_set(self, client, monkeypatch):
+        monkeypatch.setenv("MEMPALACE_TOKEN", "s3cret")
+        r = client.get("/healthz")
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+
+
 class TestStdioDefaultAddedBy:
     """When no HTTP request is in flight, _default_added_by() returns 'mcp'."""
 
