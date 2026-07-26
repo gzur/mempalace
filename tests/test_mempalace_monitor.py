@@ -63,9 +63,7 @@ class TestMaintenanceStatus:
 
 
 class TestMainSuppression:
-    def test_main_returns_zero_without_running_checks_when_flag_set(
-        self, monitor, monkeypatch
-    ):
+    def test_main_returns_zero_without_running_checks_when_flag_set(self, monitor, monkeypatch):
         # ``mempalace.health`` would be the heavy import; if main runs
         # checks even though the flag is set, this will blow up.
         def _explode(*_a, **_kw):
@@ -110,3 +108,82 @@ class TestMainSuppression:
         # Second tick with the same stale flag must NOT re-warn.
         assert monitor.main() == 0
         assert len(notifies) == 1
+
+
+class _Check:
+    """Minimal stand-in for ``mempalace.health.CheckResult``."""
+
+    def __init__(self, name, status, detail="detail", signature="sig"):
+        self.name = name
+        self.status = status
+        self.detail = detail
+        self.signature = signature
+        self.value = None
+        self.extra: dict = {}
+
+
+def _install_fake_health(monkeypatch, statuses):
+    """Install a fake ``mempalace.health`` whose ``run_checks`` yields one
+    single-check tick per configured status string, in order."""
+    import sys
+
+    seq = iter(statuses)
+
+    def run_checks():
+        return [_Check("daemon_port", next(seq))]
+
+    def overall_status(checks):
+        return checks[0].status
+
+    fake = type(
+        "_FakeHealth",
+        (),
+        {
+            "FAIL": "fail",
+            "WARN": "warn",
+            "OK": "ok",
+            "run_checks": staticmethod(run_checks),
+            "overall_status": staticmethod(overall_status),
+        },
+    )
+    monkeypatch.setitem(sys.modules, "mempalace.health", fake)
+
+
+class TestDebounce:
+    def test_pages_only_on_third_consecutive_fail_then_recovers(self, monitor, monkeypatch):
+        assert monitor.DEBOUNCE_TICKS == 3
+        notifies: list[tuple[str, str]] = []
+        beads: list = []
+        monkeypatch.setattr(monitor, "_notify", lambda t, b: notifies.append((t, b)))
+        monkeypatch.setattr(monitor, "_file_bead", lambda c: beads.append(c))
+        _install_fake_health(monkeypatch, ["fail", "fail", "fail", "fail", "ok"])
+
+        monitor.main()  # fail 1/3 — held
+        assert notifies == [] and beads == []
+        monitor.main()  # fail 2/3 — held
+        assert notifies == [] and beads == []
+
+        monitor.main()  # fail 3/3 — page once
+        assert len(notifies) == 1 and "FAIL" in notifies[0][0]
+        assert len(beads) == 1
+
+        monitor.main()  # fail 4 — already announced, stay quiet
+        assert len(notifies) == 1 and len(beads) == 1
+
+        monitor.main()  # ok — recovery announced once
+        assert len(notifies) == 2 and "recovered" in notifies[1][0].lower()
+
+    def test_single_tick_blip_is_never_paged(self, monitor, monkeypatch):
+        """A lone FAIL that clears next tick (the sleep/wake case) is silent —
+        no FAIL page and no spurious 'recovered'."""
+        notifies: list[tuple[str, str]] = []
+        beads: list = []
+        monkeypatch.setattr(monitor, "_notify", lambda t, b: notifies.append((t, b)))
+        monkeypatch.setattr(monitor, "_file_bead", lambda c: beads.append(c))
+        _install_fake_health(monkeypatch, ["ok", "fail", "ok"])
+
+        monitor.main()
+        monitor.main()
+        monitor.main()
+        assert notifies == []
+        assert beads == []

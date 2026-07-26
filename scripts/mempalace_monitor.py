@@ -7,10 +7,12 @@ Run via launchd every 5 minutes (see
 1. Run ``mempalace.health.run_checks``.
 2. Diff against last tick's status (state file at
    ``~/.mempalace/monitor_state.json``).
-3. On any status transition (ok ↔ warn ↔ fail), fire a macOS Notification
-   Center alert via ``osascript``.
-4. On any FAIL, dedup-check the beads database and create or update a
-   ``--label=mempalace`` bead carrying the check's ``failure_signature``.
+3. Log every raw status transition, but only fire a macOS Notification
+   Center alert (via ``osascript``) once a FAIL has persisted for
+   ``DEBOUNCE_TICKS`` consecutive checks — single-tick blips (e.g. a probe
+   landing on a laptop sleep/wake edge) self-heal and stay silent.
+4. When a debounced FAIL fires, dedup-check the beads database and create or
+   update a ``--label=mempalace`` bead carrying the ``failure_signature``.
 
 Stays quiet when nothing changes. Designed to be cheap enough to run on a
 5-minute cadence: every check is read-only and avoids opening a chromadb
@@ -35,6 +37,11 @@ MAINTENANCE_FLAG = STATE_DIR / "MAINTENANCE"
 # anything legitimate (repair, HNSW rebuild, manual bootout) finishes in
 # minutes. A flag past this threshold is almost certainly forgotten.
 STALE_FLAG_HOURS = 6.0
+# Only page (notify + file a bead) once a check has FAILed for this many
+# consecutive ticks. At a 5-minute cadence that's ~15 minutes of sustained
+# failure, which filters single-tick blips — chiefly sleep/wake edges on a
+# laptop host, where a probe lands mid-suspend and self-heals next tick.
+DEBOUNCE_TICKS = 3
 
 
 def _log(line: str) -> None:
@@ -44,7 +51,7 @@ def _log(line: str) -> None:
         f.write(f"{ts} {line}\n")
 
 
-def _load_state() -> dict[str, str]:
+def _load_state() -> dict:
     if not STATE_FILE.is_file():
         return {}
     try:
@@ -53,7 +60,7 @@ def _load_state() -> dict[str, str]:
         return {}
 
 
-def _save_state(state: dict[str, str]) -> None:
+def _save_state(state: dict) -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(json.dumps(state, indent=2))
 
@@ -192,46 +199,70 @@ def main() -> int:
         return 0
 
     try:
-        from mempalace.health import FAIL, OK, WARN, overall_status, run_checks
+        from mempalace.health import FAIL, WARN, overall_status, run_checks
     except ImportError as e:
         _log(f"import mempalace.health failed: {e}")
         return 2
 
     checks = run_checks()
     prior = _load_state()
-    current = {c.name: c.status for c in checks}
     overall = overall_status(checks)
 
-    transitions = []
+    # Reserved (underscore) keys carry debounce bookkeeping alongside the
+    # per-check statuses. ``run_checks`` never names a check with a leading
+    # underscore, so they can't collide.
+    prior_streaks: dict[str, int] = prior.get("_fail_streaks") or {}
+    prior_announced: dict[str, bool] = prior.get("_announced") or {}
+    new_streaks: dict[str, int] = {}
+    new_announced: dict[str, bool] = {}
+
+    any_transition = False
     for c in checks:
         prev = prior.get(c.name)
-        if prev != c.status:
-            transitions.append((c, prev))
+        was_announced = bool(prior_announced.get(c.name))
+        # Consecutive-FAIL streak: bump on FAIL, reset otherwise.
+        streak = (prior_streaks.get(c.name, 0) + 1) if c.status == FAIL else 0
+        new_streaks[c.name] = streak
 
-    if transitions:
-        for c, prev in transitions:
-            _log(
-                f"transition {c.name}: {prev or 'unknown'} -> {c.status} ({c.detail})"
-            )
-            if c.status == FAIL:
+        # Log every raw status change for forensics — this is not a page.
+        if prev != c.status:
+            any_transition = True
+            _log(f"transition {c.name}: {prev or 'unknown'} -> {c.status} ({c.detail})")
+
+        if c.status == FAIL:
+            # Debounce: page exactly on the tick the streak crosses the
+            # threshold; stay quiet on earlier blips and on later ticks of
+            # an already-announced failure.
+            if streak == DEBOUNCE_TICKS:
                 _notify(
                     f"MemPalace: {c.name} FAIL",
-                    c.detail,
+                    f"{c.detail} (failing {streak} consecutive ticks)",
                 )
                 _file_bead(c)
-            elif c.status == WARN:
-                _notify(
-                    f"MemPalace: {c.name} warn",
-                    c.detail,
-                )
-            elif c.status == OK and prev in (WARN, FAIL):
-                _notify(
-                    f"MemPalace: {c.name} recovered",
-                    c.detail,
-                )
-    else:
+                new_announced[c.name] = True
+            else:
+                new_announced[c.name] = was_announced
+                if streak < DEBOUNCE_TICKS:
+                    _log(f"debounce {c.name}: fail {streak}/{DEBOUNCE_TICKS}, holding ({c.detail})")
+        elif c.status == WARN:
+            if prev != c.status:
+                _notify(f"MemPalace: {c.name} warn", c.detail)
+                new_announced[c.name] = True
+            else:
+                new_announced[c.name] = was_announced
+        else:  # OK
+            new_announced[c.name] = False
+            # Only announce recovery for a non-OK state we actually paged,
+            # so a debounced (never-paged) blip doesn't emit a lone recover.
+            if was_announced:
+                _notify(f"MemPalace: {c.name} recovered", c.detail)
+
+    if not any_transition:
         _log(f"tick clean; overall={overall}")
 
+    current: dict = {c.name: c.status for c in checks}
+    current["_fail_streaks"] = new_streaks
+    current["_announced"] = new_announced
     _save_state(current)
     return 0
 
