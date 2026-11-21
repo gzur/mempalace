@@ -1834,12 +1834,29 @@ def tool_diary_read(agent_name: str, last_n: int = 10, wing: str = ""):
     if not col:
         return _no_palace()
 
-    # Build filter: always scope by agent + room=diary. Wing is optional —
-    # when empty, return entries across all wings for this agent (matches
-    # the #1097 empty-string-as-no-filter convention for LLM ergonomics).
-    conditions = [{"room": "diary"}, {"agent": agent_name}]
+    # Build filter: always scope by agent. Diary entries live in one of two
+    # places: room "diary" inside a named wing (hook and wing-scoped writes),
+    # or the per-agent room agents/<agent> that default-wing writes use (see
+    # tool_diary_write). Wing is optional — when empty, return entries across
+    # all wings for this agent (matches the #1097 empty-string-as-no-filter
+    # convention for LLM ergonomics).
+    location = {
+        "$or": [
+            {"room": "diary"},
+            {"$and": [{"wing": "agents"}, {"room": agent_name}]},
+        ]
+    }
+    conditions = [location, {"agent": agent_name}]
     if wing:
-        conditions.insert(0, {"wing": wing})
+        # tool_diary_write strips the legacy "wing_" prefix before storing,
+        # while hook-written entries keep it. Match both spellings.
+        wings = [wing]
+        if wing.startswith("wing_") and len(wing) > 5:
+            wings.append(wing[5:])
+        if len(wings) == 1:
+            conditions.insert(0, {"wing": wing})
+        else:
+            conditions.insert(0, {"$or": [{"wing": w} for w in wings]})
 
     try:
         results = col.get(
