@@ -43,6 +43,14 @@ QUEUE_LAG_FAIL = 50_000
 # can't stay up across restarts.
 LAUNCHD_CRASHES_WARN = 1
 LAUNCHD_CRASHES_FAIL = 3
+# launchd never resets ``successive crashes`` once a job stabilises, so the
+# counter keeps describing an episode that is long over. (Observed: the
+# 2026-09-17 FTS5 segfault loop left crashes=35 pinned, which held
+# overall=fail for 57 days while the daemon ran clean -- the check cried wolf
+# every 5 minutes and so could no longer signal a real failure.) Treat the
+# counter as historical once the CURRENT process has stayed up this long: a
+# KeepAlive flap respawns within seconds, so an hour of uptime is not it.
+LAUNCHD_STABLE_UPTIME_SECONDS = 3600.0
 
 DAEMON_HOST_DEFAULT = "127.0.0.1"
 DAEMON_PORT_DEFAULT = 9876
@@ -109,6 +117,57 @@ def check_daemon_healthz(host: str = DAEMON_HOST_DEFAULT, port: int = DAEMON_POR
     )
 
 
+def _process_uptime_seconds(pid):
+    """Seconds the given pid has been running, or None if that is unknowable.
+
+    Uses ``ps -o etime=`` ([[DD-]HH:]MM:SS) rather than psutil, which is only
+    a dev dependency here. Returning None on any doubt is deliberate: the one
+    caller treats None as "cannot vouch for uptime" and keeps alerting, so a
+    parsing failure can never silence a real flap.
+    """
+    if pid is None:
+        return None
+    try:
+        out = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "etime="],
+            capture_output=True,
+            text=True,
+            timeout=3.0,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if out.returncode != 0:
+        return None
+    raw = out.stdout.strip()
+    if not raw:
+        return None
+    days = 0
+    if "-" in raw:
+        day_part, _, raw = raw.partition("-")
+        try:
+            days = int(day_part)
+        except ValueError:
+            return None
+    parts = raw.split(":")
+    if len(parts) == 2:
+        parts = ["0"] + parts
+    if len(parts) != 3:
+        return None
+    try:
+        hours, minutes, seconds = (int(x) for x in parts)
+    except ValueError:
+        return None
+    return days * 86400.0 + hours * 3600.0 + minutes * 60.0 + seconds
+
+
+def _humanize(seconds):
+    if seconds >= 86400:
+        return "%.1fd" % (seconds / 86400)
+    if seconds >= 3600:
+        return "%.1fh" % (seconds / 3600)
+    return "%.0fm" % (seconds / 60)
+
+
 def check_launchd_status(label: str = LAUNCHD_LABEL_DEFAULT) -> Check:
     """Parse ``launchctl print`` for successive_crashes + last_terminating_signal."""
     uid = os.getuid()
@@ -150,6 +209,31 @@ def check_launchd_status(label: str = LAUNCHD_LABEL_DEFAULT) -> Check:
                 pass
 
     extra = {"pid": pid, "successive_crashes": crashes, "last_terminating_signal": last_signal}
+
+    # Age the crash history out against the current process. Without this the
+    # counter below is a permanent verdict on a job that recovered long ago.
+    uptime = _process_uptime_seconds(pid)
+    if uptime is not None:
+        extra["uptime_seconds"] = round(uptime, 1)
+    if (crashes or last_signal) and uptime is not None and uptime >= LAUNCHD_STABLE_UPTIME_SECONDS:
+        extra["historical"] = True
+        past = []
+        if crashes:
+            past.append(f"{crashes} crashes")
+        if last_signal:
+            past.append(f"last signal: {last_signal}")
+        return Check(
+            name="launchd",
+            status=OK,
+            detail=(
+                f"pid={pid} up {_humanize(uptime)}, runs clean; "
+                f"launchd still reports {', '.join(past)} from before this "
+                "process started (it does not reset the counter)"
+            ),
+            value=crashes,
+            extra=extra,
+        )
+
     if crashes >= LAUNCHD_CRASHES_FAIL:
         return Check(
             name="launchd",
