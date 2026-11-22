@@ -231,3 +231,23 @@ class TestHybridRankTolerantOfMissingDistance:
         assert all("bm25_score" in r for r in ranked), "rerank should add bm25_score"
         # Both must survive — neither should crash on distance=None.
         assert len(ranked) == 2
+
+
+def test_bm25_sqlite_matches_rare_key_term_past_common_words(tmp_path):
+    """A ticket key must reach the BM25 pool even when common query words
+    match more rows than the candidate limit."""
+    from mempalace.searcher import _bm25_only_via_sqlite
+
+    palace = str(tmp_path / "palace")
+    col = get_collection(palace, create=True)
+    filler = [f"what was the fix for the build, note {i}" for i in range(60)]
+    col.upsert(
+        ids=[f"F{i}" for i in range(60)] + ["K"],
+        documents=filler + ["VICE-1624: one grep exclude for .deploy in the drift check"],
+        metadatas=[{"wing": "w", "room": "r", "source_file": f"f{i}.txt"} for i in range(60)]
+        + [{"wing": "w", "room": "r", "source_file": "k.txt"}],
+    )
+    r = _bm25_only_via_sqlite(
+        "What was the fix for VICE-1624?", palace, n_results=5, max_candidates=20
+    )
+    assert any("VICE-1624" in h["text"] for h in r["results"])

@@ -487,7 +487,17 @@ def _bm25_only_via_sqlite(
         candidate_ids: list[int] = []
         use_recency_fallback = not tokens
         if tokens:
-            fts_query = " OR ".join(tokens)
+            # Literal key terms (ticket keys, SHAs, file and function names)
+            # are rare in the corpus; OR-ing them with common words lets the
+            # common words fill the candidate LIMIT first. Match on the
+            # quoted key terms alone when the query has any.
+            from .query_sanitizer import extract_key_terms
+
+            keys = [k for k in extract_key_terms(query) if len(k) >= 3]
+            if keys:
+                fts_query = " OR ".join('"' + k.replace('"', "") + '"' for k in keys)
+            else:
+                fts_query = " OR ".join(tokens)
             filter_sql, filter_params = _metadata_filter_sql("embedding_fulltext_search.rowid")
             try:
                 rows = conn.execute(
