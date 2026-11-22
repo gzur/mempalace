@@ -124,8 +124,14 @@ def _hybrid_rank(
     vector_weight: float = 0.6,
     bm25_weight: float = 0.4,
     distance_key: str = "distance",
+    recency_weight: float = 0.0,
 ) -> list:
     """Re-rank ``results`` by a convex combination of vector similarity and BM25.
+
+    With ``recency_weight > 0`` a date preference is added: each result
+    with a ``source_date`` gets ``recency_weight * r``, where ``r`` is its
+    date rank inside the candidate set (newest 1.0, oldest 0.0). Results
+    without a date get 0. The default 0.0 keeps the historical ranking.
 
     * Vector similarity uses absolute cosine sim ``max(0, 1 - distance)`` —
       ChromaDB's hnsw cosine distance lives in ``[0, 2]`` (0 = identical).
@@ -169,9 +175,33 @@ def _hybrid_rank(
         r["bm25_score"] = round(raw, 3)
         scored.append((vector_weight * vec_sim + bm25_weight * norm, r))
 
+    if recency_weight > 0:
+        rec = _recency_scores([r for _, r in scored])
+        scored = [(score + recency_weight * rec[i], r) for i, (score, r) in enumerate(scored)]
+
     scored.sort(key=lambda pair: pair[0], reverse=True)
     results[:] = [r for _, r in scored]
     return results
+
+
+def _recency_scores(results: list) -> list:
+    """Date rank of each result in ``[0, 1]`` (newest 1.0); 0.0 without a date."""
+    dates = sorted({r.get("source_date") for r in results if r.get("source_date")})
+    if not dates:
+        return [0.0] * len(results)
+    if len(dates) == 1:
+        return [1.0 if r.get("source_date") else 0.0 for r in results]
+    pos = {d: i / (len(dates) - 1) for i, d in enumerate(dates)}
+    return [pos.get(r.get("source_date"), 0.0) for r in results]
+
+
+def _default_recency_weight() -> float:
+    """``MEMPALACE_RECENCY_WEIGHT`` as a float, else 0.0 (no date preference)."""
+    raw = os.environ.get("MEMPALACE_RECENCY_WEIGHT", "")
+    try:
+        return max(0.0, float(raw)) if raw.strip() else 0.0
+    except ValueError:
+        return 0.0
 
 
 def build_where_filter(wing: str = None, room: str = None) -> dict:
@@ -589,6 +619,7 @@ def _bm25_only_via_sqlite(
                 "room": meta.get("room", "unknown"),
                 "source_file": Path(full_source).name if full_source else "?",
                 "created_at": meta.get("filed_at", "unknown"),
+                "source_date": meta.get("source_date"),
                 # No vector distance available in BM25-only mode.
                 "similarity": None,
                 "distance": None,
@@ -709,7 +740,9 @@ _CANDIDATE_MERGERS = {
 }
 
 
-def _rank_pool_and_truncate(scored: list, query: str, n_results: int) -> list:
+def _rank_pool_and_truncate(
+    scored: list, query: str, n_results: int, recency_weight: float = 0.0
+) -> list:
     """Hybrid-rank the FULL over-fetched pool then truncate to ``n_results``.
 
     Previously the pool was vector-sorted and cut to ``n_results`` here, so
@@ -725,7 +758,7 @@ def _rank_pool_and_truncate(scored: list, query: str, n_results: int) -> list:
     complexity ceiling.
     """
     scored.sort(key=lambda h: h["_sort_key"])
-    _hybrid_rank(scored, query, distance_key="effective_distance")
+    _hybrid_rank(scored, query, distance_key="effective_distance", recency_weight=recency_weight)
     return scored[:n_results]
 
 
@@ -837,8 +870,12 @@ def search_memories(
     vector_disabled: bool = False,
     candidate_strategy: str = "vector",
     collection_name: str = None,
+    recency_weight: float = None,
 ) -> dict:
     """Programmatic search — returns a dict instead of printing.
+
+    ``recency_weight`` (default: env ``MEMPALACE_RECENCY_WEIGHT``, else 0)
+    adds a date preference to the hybrid rank; see :func:`_hybrid_rank`.
 
     Used by the MCP server and other callers that need data.
 
@@ -1035,6 +1072,7 @@ def search_memories(
             "room": meta.get("room", "unknown"),
             "source_file": Path(source).name if source else "?",
             "created_at": meta.get("filed_at", "unknown"),
+            "source_date": meta.get("source_date"),
             "similarity": round(max(0.0, 1 - effective_dist), 3),
             "distance": round(dist, 4),
             "effective_distance": round(effective_dist, 4),
@@ -1052,7 +1090,9 @@ def search_memories(
             entry["closet_preview"] = closet_preview
         scored.append(entry)
 
-    hits = _rank_pool_and_truncate(scored, query, n_results)
+    if recency_weight is None:
+        recency_weight = _default_recency_weight()
+    hits = _rank_pool_and_truncate(scored, query, n_results, recency_weight=recency_weight)
 
     # Drawer-grep enrichment: for closet-boosted hits whose source has
     # multiple drawers, swap in the keyword-best chunk + its immediate
@@ -1083,7 +1123,9 @@ def search_memories(
     # ``limit`` parameter is built on. Uses the same closet-aware distance
     # as the pre-truncation rank above; union BM25-only candidates lack
     # ``effective_distance`` and fall back to raw distance (None → BM25-only).
-    hits = _hybrid_rank(hits, query, distance_key="effective_distance")[:n_results]
+    hits = _hybrid_rank(
+        hits, query, distance_key="effective_distance", recency_weight=recency_weight
+    )[:n_results]
     for h in hits:
         h.pop("_sort_key", None)
         h.pop("_source_file_full", None)

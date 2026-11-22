@@ -131,3 +131,38 @@ class TestClosetMetadata:
             assert h["matched_via"] == "drawer"
             assert "closet_preview" not in h
             assert h["closet_boost"] == 0.0
+
+
+def test_recency_weight_zero_keeps_order():
+    from mempalace.searcher import _hybrid_rank
+
+    rows = [
+        {"text": "alpha beta", "distance": 0.2, "source_date": "2026-01-01T00:00:00"},
+        {"text": "alpha", "distance": 0.3, "source_date": "2026-11-01T00:00:00"},
+    ]
+    out = _hybrid_rank([dict(r) for r in rows], "alpha beta")
+    assert out[0]["source_date"].startswith("2026-01")
+
+
+def test_recency_weight_lifts_newer_close_match():
+    from mempalace.searcher import _hybrid_rank
+
+    rows = [
+        {"text": "floor rule is seven", "distance": 0.30, "source_date": "2026-09-21T00:00:00"},
+        {"text": "floor rule is eight", "distance": 0.32, "source_date": "2026-09-24T00:00:00"},
+        {"text": "unrelated", "distance": 0.9},
+    ]
+    out = _hybrid_rank([dict(r) for r in rows], "floor rule", recency_weight=0.1)
+    assert out[0]["source_date"].startswith("2026-09-24")
+    assert "source_date" not in out[-1]
+
+
+def test_recency_scores_and_env_default(monkeypatch):
+    from mempalace.searcher import _default_recency_weight, _recency_scores
+
+    rows = [{"source_date": "b"}, {}, {"source_date": "a"}, {"source_date": "c"}]
+    assert _recency_scores(rows) == [0.5, 0.0, 0.0, 1.0]
+    monkeypatch.setenv("MEMPALACE_RECENCY_WEIGHT", "0.15")
+    assert _default_recency_weight() == 0.15
+    monkeypatch.setenv("MEMPALACE_RECENCY_WEIGHT", "bad")
+    assert _default_recency_weight() == 0.0
