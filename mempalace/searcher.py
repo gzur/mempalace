@@ -125,6 +125,7 @@ def _hybrid_rank(
     bm25_weight: float = 0.4,
     distance_key: str = "distance",
     recency_weight: float = 0.0,
+    key_term_weight: float = None,
 ) -> list:
     """Re-rank ``results`` by a convex combination of vector similarity and BM25.
 
@@ -132,6 +133,14 @@ def _hybrid_rank(
     with a ``source_date`` gets ``recency_weight * r``, where ``r`` is its
     date rank inside the candidate set (newest 1.0, oldest 0.0). Results
     without a date get 0. The default 0.0 keeps the historical ranking.
+
+    ``key_term_weight`` (default: env ``MEMPALACE_KEY_TERM_WEIGHT``, else
+    0.3) adds ``key_term_weight * f`` where ``f`` is the share of the
+    query's literal key terms (ticket keys, SHAs, file names; see
+    :func:`query_sanitizer.extract_key_terms`) that appear verbatim in the
+    result. BM25 splits ``VICE-1624`` into ``vice`` and ``1624``, so
+    without it every ticket that shares the project prefix scores alike.
+    A query without key terms is unaffected.
 
     * Vector similarity uses absolute cosine sim ``max(0, 1 - distance)`` —
       ChromaDB's hnsw cosine distance lives in ``[0, 2]`` (0 = identical).
@@ -175,6 +184,24 @@ def _hybrid_rank(
         r["bm25_score"] = round(raw, 3)
         scored.append((vector_weight * vec_sim + bm25_weight * norm, r))
 
+    if key_term_weight is None:
+        key_term_weight = _default_key_term_weight()
+    if key_term_weight > 0:
+        from .query_sanitizer import extract_key_terms
+
+        keys = [k.lower() for k in extract_key_terms(query)]
+        if keys:
+            scored = [
+                (
+                    score
+                    + key_term_weight
+                    * sum(k in (r.get("text") or "").lower() for k in keys)
+                    / len(keys),
+                    r,
+                )
+                for score, r in scored
+            ]
+
     if recency_weight > 0:
         rec = _recency_scores([r for _, r in scored])
         scored = [(score + recency_weight * rec[i], r) for i, (score, r) in enumerate(scored)]
@@ -202,6 +229,15 @@ def _default_recency_weight() -> float:
         return max(0.0, float(raw)) if raw.strip() else 0.0
     except ValueError:
         return 0.0
+
+
+def _default_key_term_weight() -> float:
+    """``MEMPALACE_KEY_TERM_WEIGHT`` as a float, else 0.3."""
+    raw = os.environ.get("MEMPALACE_KEY_TERM_WEIGHT", "")
+    try:
+        return max(0.0, float(raw)) if raw.strip() else 0.3
+    except ValueError:
+        return 0.3
 
 
 def build_where_filter(wing: str = None, room: str = None) -> dict:

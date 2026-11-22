@@ -166,3 +166,17 @@ def test_recency_scores_and_env_default(monkeypatch):
     assert _default_recency_weight() == 0.15
     monkeypatch.setenv("MEMPALACE_RECENCY_WEIGHT", "bad")
     assert _default_recency_weight() == 0.0
+
+
+def test_key_term_bonus_lifts_exact_ticket_match(monkeypatch):
+    from mempalace.searcher import _hybrid_rank
+
+    monkeypatch.delenv("MEMPALACE_KEY_TERM_WEIGHT", raising=False)
+    rows = [
+        {"text": "VICE-1581 is CI drift, see VICE-1580", "distance": 0.05},
+        {"text": "VICE-1624: grep exclude for .deploy", "distance": 0.45},
+    ]
+    out = _hybrid_rank([dict(r) for r in rows], "What was the fix for VICE-1624?")
+    assert out[0]["text"].startswith("VICE-1624")
+    plain = [{"text": "alpha beta", "distance": 0.1}, {"text": "beta", "distance": 0.5}]
+    assert _hybrid_rank(plain, "alpha beta")[0]["text"] == "alpha beta"
