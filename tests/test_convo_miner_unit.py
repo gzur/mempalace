@@ -176,3 +176,37 @@ class TestFileChunksLocked:
         assert dict(room_counts) == {}
         assert skipped is False
         assert col.batch_sizes == [2, 2, 1]
+
+
+def test_message_timestamps_reads_sorted_jsonl_dates(tmp_path):
+    from mempalace.convo_miner import _message_timestamps
+
+    f = tmp_path / "s.jsonl"
+    f.write_text(
+        '{"type":"user","timestamp":"2026-09-11T12:01:26.123Z"}\n'
+        '{"type":"summary"}\n'
+        "not json\n"
+        '{"type":"assistant","timestamp":"2026-09-10T22:20:18Z"}\n',
+        encoding="utf-8",
+    )
+    assert _message_timestamps(f) == ["2026-09-10T22:20:18", "2026-09-11T12:01:26"]
+    other = tmp_path / "s.txt"
+    other.write_text('"timestamp":"2026-09-10T22:20:18Z"', encoding="utf-8")
+    assert _message_timestamps(other) == []
+
+
+def test_date_chunks_spreads_timestamps_in_order():
+    from mempalace.convo_miner import _date_chunks
+
+    chunks = [{"content": str(i)} for i in range(4)]
+    _date_chunks(chunks, ["2026-01-01T00:00:00", "2026-01-02T00:00:00"])
+    assert [c["source_date"][:10] for c in chunks] == [
+        "2026-01-01",
+        "2026-01-01",
+        "2026-01-02",
+        "2026-01-02",
+    ]
+    assert all(c["session_end"] == "2026-01-02T00:00:00" for c in chunks)
+    empty = [{"content": "x"}]
+    _date_chunks(empty, [])
+    assert "source_date" not in empty[0]

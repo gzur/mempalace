@@ -322,6 +322,60 @@ def scan_convos(convo_dir: str) -> list:
 # =============================================================================
 
 
+_TS_RE = None
+
+
+def _message_timestamps(filepath) -> list:
+    """Return the ISO timestamps of the dated lines of a JSONL transcript.
+
+    Claude Code and Codex JSONL lines carry a top-level ``timestamp``.
+    Normalization drops them, so the miner reads them here to date each
+    drawer. Returns ``[]`` for files without such lines (plain text,
+    exports) or on any read error.
+    """
+    import json
+    import re
+
+    global _TS_RE
+    if _TS_RE is None:
+        _TS_RE = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d")
+    if not str(filepath).endswith(".jsonl"):
+        return []
+    out = []
+    try:
+        with open(filepath, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if '"timestamp"' not in line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except ValueError:
+                    continue
+                ts = obj.get("timestamp") if isinstance(obj, dict) else None
+                if isinstance(ts, str) and _TS_RE.match(ts):
+                    out.append(ts[:19])
+    except OSError:
+        return []
+    out.sort()
+    return out
+
+
+def _date_chunks(chunks: list, timestamps: list) -> None:
+    """Set ``source_date`` on each chunk from the transcript timestamps.
+
+    Chunks come in transcript order, so chunk ``i`` of ``n`` gets the
+    timestamp at the same relative position. The date is an estimate
+    inside one session; ``session_end`` (the last timestamp) is exact.
+    """
+    if not timestamps or not chunks:
+        return
+    n, m = len(chunks), len(timestamps)
+    for i, chunk in enumerate(chunks):
+        pos = min(m - 1, int((i + 0.5) * m / n))
+        chunk["source_date"] = timestamps[pos]
+        chunk["session_end"] = timestamps[-1]
+
+
 def _file_chunks_locked(collection, source_file, chunks, wing, room, agent, extract_mode):
     """Lock the source file, purge stale drawers, and upsert fresh chunks.
 
@@ -376,6 +430,14 @@ def _file_chunks_locked(collection, source_file, chunks, wing, room, agent, extr
                         "ingest_mode": "convos",
                         "extract_mode": extract_mode,
                         "normalize_version": NORMALIZE_VERSION,
+                        **(
+                            {
+                                "source_date": chunk["source_date"],
+                                "session_end": chunk["session_end"],
+                            }
+                            if chunk.get("source_date")
+                            else {}
+                        ),
                     }
                 )
             try:
@@ -482,6 +544,8 @@ def mine_convos(
             # Each chunk already has memory_type; use it as the room name
         else:
             chunks = chunk_exchanges(content)
+
+        _date_chunks(chunks, _message_timestamps(filepath))
 
         if not chunks:
             if not dry_run:
