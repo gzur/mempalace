@@ -116,17 +116,105 @@ def _build_ef_class():
     return _MempalaceONNX
 
 
-def get_embedding_function(device: Optional[str] = None):
+DEFAULT_MODEL = "minilm"
+
+# Query-side instructions for asymmetric retrieval models. Documents are
+# embedded as is; only the search query gets the prefix.
+_QUERY_PREFIXES = {
+    "bge-": "Represent this sentence for searching relevant passages: ",
+    "embeddinggemma": "task: search result | query: ",
+    "nomic-embed": "search_query: ",
+}
+_DOC_PREFIXES = {
+    "embeddinggemma": "title: none | text: ",
+    "nomic-embed": "search_document: ",
+}
+
+
+def _prefix_for(model_name: str, table: dict) -> str:
+    lowered = model_name.lower()
+    for key, prefix in table.items():
+        if key in lowered:
+            return prefix
+    return ""
+
+
+def _st_device(device: str) -> str:
+    """Map an ``embedding_device`` value to a torch device string."""
+    device = (device or "auto").strip().lower()
+    if device in ("cpu", "cuda", "mps"):
+        return device
+    if device == "coreml":
+        device = "auto"
+    try:
+        import torch
+
+        if device == "auto":
+            if torch.cuda.is_available():
+                return "cuda"
+            if torch.backends.mps.is_available():
+                return "mps"
+    except ImportError:
+        pass
+    return "cpu"
+
+
+def _build_st_ef_class():
+    """Sentence-transformers EF that keeps ChromaDB's registered name.
+
+    ``name()`` stays ``"sentence_transformer"`` so ChromaDB can resolve the
+    persisted collection config. On top of the stock class it adds the
+    query/document prefixes that asymmetric models (bge, embeddinggemma,
+    nomic) need, and L2-normalized vectors for cosine search.
+    """
+    from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
+
+    class _MempalaceST(SentenceTransformerEmbeddingFunction):
+        def __init__(self, model_name: str, device: str):
+            super().__init__(model_name=model_name, device=device, normalize_embeddings=True)
+            self._query_prefix = _prefix_for(model_name, _QUERY_PREFIXES)
+            self._doc_prefix = _prefix_for(model_name, _DOC_PREFIXES)
+
+        def __call__(self, input):
+            if self._doc_prefix:
+                input = [self._doc_prefix + d for d in input]
+            return super().__call__(input)
+
+        def embed_query(self, input):
+            if self._query_prefix:
+                input = [self._query_prefix + q for q in input]
+            return super().__call__(input)
+
+    return _MempalaceST
+
+
+def get_embedding_function(device: Optional[str] = None, model: Optional[str] = None):
     """Return a cached embedding function bound to the requested device.
 
     ``device=None`` reads from :class:`MempalaceConfig.embedding_device`.
-    The returned function is shared across calls with the same resolved
-    provider list so we only pay model-load cost once per process.
+    ``model=None`` reads from :class:`MempalaceConfig.embedding_model`;
+    ``"minilm"`` is the ONNX default, any other value is a local
+    sentence-transformers model. The returned function is shared across
+    calls with the same resolved settings so we only pay model-load cost
+    once per process.
     """
-    if device is None:
+    if device is None or model is None:
         from .config import MempalaceConfig
 
-        device = MempalaceConfig().embedding_device
+        cfg = MempalaceConfig()
+        device = cfg.embedding_device if device is None else device
+        model = cfg.embedding_model if model is None else model
+
+    if model and model.lower() != DEFAULT_MODEL:
+        st_device = _st_device(device)
+        cache_key = ("st", model, st_device)
+        cached = _EF_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+        ef = _build_st_ef_class()(model_name=model, device=st_device)
+        _EF_CACHE[cache_key] = ef
+        logger.info("Embedding function initialized (model=%s device=%s)", model, st_device)
+        return ef
 
     providers, effective = _resolve_providers(device)
     cache_key = tuple(providers)

@@ -358,6 +358,25 @@ class MempalaceConfig:
         return str(self._file_config.get("embedding_device", "auto")).strip().lower()
 
     @property
+    def embedding_model(self):
+        """Embedding model for the palace.
+
+        ``"minilm"`` (default) keeps the historical ChromaDB ONNX
+        all-MiniLM-L6-v2. Any other value is a local sentence-transformers
+        model name, for example ``"BAAI/bge-base-en-v1.5"``. The model runs
+        on this machine; no remote embedding API is ever called. A palace
+        must always be read with the model that wrote it.
+
+        Read from env ``MEMPALACE_EMBEDDING_MODEL`` first, then
+        ``embedding_model`` in ``config.json``, then ``"minilm"``.
+        """
+        env_val = os.environ.get("MEMPALACE_EMBEDDING_MODEL")
+        if env_val and env_val.strip():
+            return env_val.strip()
+        val = self._file_config.get("embedding_model", "minilm")
+        return str(val).strip() or "minilm"
+
+    @property
     def topic_tunnel_min_count(self):
         """Minimum number of overlapping confirmed topics required to create
         a cross-wing tunnel between two wings.

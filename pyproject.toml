@@ -72,6 +72,10 @@ http = ["starlette>=0.40", "uvicorn>=0.30"]
 gpu = ["onnxruntime-gpu>=1.16"]
 dml = ["onnxruntime-directml>=1.16"]
 coreml = ["onnxruntime>=1.16"]
+# Stronger local embedding models (bge, embeddinggemma, nomic) through
+# sentence-transformers. Set MEMPALACE_EMBEDDING_MODEL=<model name>.
+# The model runs on this machine; no remote embedding API is called.
+local-models = ["sentence-transformers>=3.0"]
 
 [dependency-groups]
 dev = ["pytest>=7.0", "pytest-cov>=4.0", "ruff>=0.4.0", "psutil>=5.9", "starlette>=0.40", "httpx>=0.27"]

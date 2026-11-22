@@ -96,3 +96,67 @@ def test_describe_device_uses_resolved_effective_device(monkeypatch):
     )
 
     assert embedding.describe_device("auto") == "cuda"
+
+
+def test_embedding_model_defaults_to_minilm(monkeypatch, tmp_path):
+    from mempalace.config import MempalaceConfig
+
+    monkeypatch.delenv("MEMPALACE_EMBEDDING_MODEL", raising=False)
+    assert MempalaceConfig(config_dir=str(tmp_path)).embedding_model == "minilm"
+
+
+def test_embedding_model_env_overrides(monkeypatch, tmp_path):
+    from mempalace.config import MempalaceConfig
+
+    monkeypatch.setenv("MEMPALACE_EMBEDDING_MODEL", " BAAI/bge-base-en-v1.5 ")
+    assert MempalaceConfig(config_dir=str(tmp_path)).embedding_model == "BAAI/bge-base-en-v1.5"
+
+
+def test_query_prefix_by_model_family():
+    assert embedding._prefix_for("BAAI/bge-base-en-v1.5", embedding._QUERY_PREFIXES).startswith(
+        "Represent this sentence"
+    )
+    assert embedding._prefix_for("google/embeddinggemma-300m", embedding._QUERY_PREFIXES) == (
+        "task: search result | query: "
+    )
+    assert (
+        embedding._prefix_for("sentence-transformers/all-mpnet-base-v2", embedding._QUERY_PREFIXES)
+        == ""
+    )
+
+
+def test_st_model_builds_sentence_transformer_ef(monkeypatch):
+    built = {}
+
+    class FakeST:
+        def __init__(self, model_name, device):
+            built["args"] = (model_name, device)
+
+    monkeypatch.setattr(embedding, "_build_st_ef_class", lambda: FakeST)
+    ef = embedding.get_embedding_function(device="cpu", model="BAAI/bge-small-en-v1.5")
+    assert isinstance(ef, FakeST)
+    assert built["args"] == ("BAAI/bge-small-en-v1.5", "cpu")
+    # cached on the second call
+    assert embedding.get_embedding_function(device="cpu", model="BAAI/bge-small-en-v1.5") is ef
+
+
+def test_minilm_model_keeps_onnx_path(monkeypatch):
+    monkeypatch.setattr("onnxruntime.get_available_providers", lambda: ["CPUExecutionProvider"])
+    ef = embedding.get_embedding_function(device="cpu", model="minilm")
+    assert ef.name() == "default"
+
+
+def test_st_ef_adds_query_prefix_only_to_queries():
+    pytest.importorskip("sentence_transformers")
+    cls = embedding._build_st_ef_class()
+    seen = []
+    ef = cls.__new__(cls)
+    ef._query_prefix = "Q: "
+    ef._doc_prefix = ""
+    ef._model = type(
+        "M", (), {"encode": lambda self, x, **k: seen.append(list(x)) or [[0.0] * 3 for _ in x]}
+    )()
+    ef.normalize_embeddings = True
+    ef.embed_query(["find x"])
+    ef(["doc y"])
+    assert seen == [["Q: find x"], ["doc y"]]
