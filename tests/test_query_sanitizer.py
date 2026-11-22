@@ -234,3 +234,56 @@ class TestRealWorldScenarios:
         assert result["original_length"] > 2000
         assert result["clean_length"] <= MAX_QUERY_LENGTH
         assert result["method"] == "question_extraction"
+
+
+# --- build_prompt_query / extract_key_terms ---
+
+
+def test_extract_key_terms_finds_literals_in_order():
+    from mempalace.query_sanitizer import extract_key_terms
+
+    text = (
+        "Fix VICE-2085 in provider.go:597 via resolveFieldExpression() and "
+        "credential_for; see !1648, commit 6a06f4e7d, ask @dora. VICE-2085 again."
+    )
+    assert extract_key_terms(text) == [
+        "VICE-2085",
+        "provider.go:597",
+        "resolveFieldExpression",
+        "credential_for",
+        "!1648",
+        "6a06f4e7d",
+        "@dora",
+    ]
+
+
+def test_extract_key_terms_drops_parts_of_longer_terms():
+    from mempalace.query_sanitizer import extract_key_terms
+
+    assert extract_key_terms("see vtask_monitor.go:726 now") == ["vtask_monitor.go:726"]
+
+
+def test_build_prompt_query_short_prompt_passes_through():
+    from mempalace.query_sanitizer import build_prompt_query
+
+    r = build_prompt_query("What was the fix for VICE-1624?")
+    assert r["query"] == "What was the fix for VICE-1624?"
+    assert r["method"] == "passthrough"
+    assert r["key_terms"] == ["VICE-1624"]
+
+
+def test_build_prompt_query_long_brief_uses_terms_first_and_last():
+    from mempalace.query_sanitizer import HOOK_QUERY_LENGTH, build_prompt_query
+
+    brief = (
+        "# Task: VICE-2475 activateSaaS takes saasResourceId\n\n"
+        + "Background text that does not matter much for the search. " * 12
+        + "\nWhen done, send your result back to @dora via hcom."
+    )
+    r = build_prompt_query(brief)
+    q = r["query"]
+    assert len(q) <= HOOK_QUERY_LENGTH
+    assert q.startswith("VICE-2475 activateSaaS saasResourceId @dora")
+    assert "Task: VICE-2475" in q
+    assert q.endswith("via hcom.")
+    assert "Background text" not in q

@@ -186,3 +186,97 @@ def sanitize_query(raw_query: str) -> dict:
         "clean_length": len(candidate),
         "method": "tail_truncation",
     }
+
+
+# --- Prompt-hook query builder ---
+
+HOOK_QUERY_LENGTH = SAFE_QUERY_LENGTH  # stays under the passthrough limit
+_MAX_KEY_TERMS = 8
+_KEY_TERM_PATTERNS = [
+    re.compile(r"\b[A-Z][A-Z0-9]{1,9}-\d{1,6}\b"),  # ticket keys: VICE-2085, CVE-2026-1
+    re.compile(r"(?<![\w!])![0-9]{2,6}\b"),  # GitLab MR: !1648
+    re.compile(r"(?<![\w@])@[a-z][a-z0-9_-]{2,30}\b"),  # agent names: @dora, @mpinject-
+    re.compile(
+        r"\b[\w-]+\.(?:go|py|ts|tsx|js|md|ya?ml|json|sh|toml|tf|sql|rs)(?::\d+)?\b"
+    ),  # file names, with optional :line
+    re.compile(r"\b[A-Za-z_][A-Za-z0-9_]{2,}\(\)"),  # function calls: foo()
+    re.compile(r"\b[a-z]+[A-Z][A-Za-z0-9]*\b"),  # camelCase identifiers
+    re.compile(r"\b[a-z0-9]+(?:_[a-z0-9]+){1,}\b"),  # snake_case identifiers
+    re.compile(r"\b(?=[0-9a-f]*[a-f])(?=[0-9a-f]*[0-9])[0-9a-f]{7,40}\b"),  # git SHAs
+]
+_MD_NOISE = re.compile(r"^[#>*\-\s`|]+")
+
+
+def extract_key_terms(text: str, limit: int = _MAX_KEY_TERMS) -> list:
+    """Return distinctive literal terms of ``text`` in order of first use.
+
+    Ticket keys, MR numbers, agent names, file names, function names,
+    identifiers and SHAs are what BM25 matches exactly and what an
+    embedding of a long brief washes out.
+    """
+    found = []
+    for pattern in _KEY_TERM_PATTERNS:
+        for m in pattern.finditer(text):
+            found.append((m.start(), m.group(0).rstrip("()")))
+    found.sort()
+    terms, seen = [], set()
+    for _, term in found:
+        key = term.lower()
+        if key not in seen:
+            seen.add(key)
+            terms.append(term)
+    # Drop a term that is part of a longer one (``foo`` inside ``foo.go:12``).
+    lowered = [t.lower() for t in terms]
+    out = [t for t, k in zip(terms, lowered) if not any(k != o and k in o for o in lowered)]
+    return out[:limit]
+
+
+def _cut_words(text: str, length: int) -> str:
+    """Cut ``text`` to at most ``length`` chars on a word boundary."""
+    if length <= 0:
+        return ""
+    if len(text) <= length:
+        return text
+    cut = text[:length].rsplit(" ", 1)[0]
+    return cut if cut else text[:length]
+
+
+def _meaningful_sentences(text: str) -> list:
+    out = []
+    for line in text.split("\n"):
+        line = _MD_NOISE.sub("", line).strip()
+        if not line:
+            continue
+        for sent in re.split(r"(?<=[.!?])\s+", line):
+            sent = sent.strip()
+            if len(sent) >= MIN_QUERY_LENGTH and len(sent.split()) >= 3:
+                out.append(sent)
+    return out
+
+
+def build_prompt_query(prompt: str, max_length: int = HOOK_QUERY_LENGTH) -> dict:
+    """Build a search query from a whole prompt for the prompt hook.
+
+    A short prompt passes through. A long one (a brief) becomes its key
+    terms plus its first and last meaningful sentences, cut to
+    ``max_length`` so the search path does not trim it again. The old
+    hook searched only the last sentence, which for a brief is often
+    "send your result back via hcom".
+    """
+    prompt = (prompt or "").strip()
+    if len(prompt) <= max_length:
+        return {"query": prompt, "method": "passthrough", "key_terms": extract_key_terms(prompt)}
+
+    terms = extract_key_terms(prompt)
+    term_part = _cut_words(" ".join(terms), max_length * 9 // 20)
+    sentences = _meaningful_sentences(prompt)
+    first = sentences[0] if sentences else ""
+    last = sentences[-1] if len(sentences) > 1 else ""
+    room = max_length - len(term_part) - (1 if term_part else 0)
+    if last:
+        first = _cut_words(first, max(room // 2, room - len(last) - 1))
+        last = _cut_words(last, room - len(first) - 1)
+    else:
+        first = _cut_words(first, room)
+    query = " ".join(p for p in (term_part, first, last) if p).strip()
+    return {"query": query, "method": "key_terms+first+last", "key_terms": terms}
