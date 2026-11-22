@@ -865,6 +865,14 @@ def tool_search(
     # here would defeat the fallback — it constructs a PersistentClient
     # which can segfault on segment load in the #1222 / self-mob failure mode.
     _refresh_vector_disabled_flag()
+    # MEMPALACE_CANDIDATE_STRATEGY=union adds BM25 candidates so exact
+    # ticket keys and SHAs reach the rank. Union needs no vector-distance
+    # bound (BM25-only hits have no distance), so it drops the default one.
+    strategy = os.environ.get("MEMPALACE_CANDIDATE_STRATEGY", "vector").strip().lower()
+    if strategy not in ("vector", "union"):
+        strategy = "vector"
+    if strategy == "union" and min_similarity is None and max_distance == 1.5:
+        dist = 0.0
     result = search_memories(
         sanitized["clean_query"],
         palace_path=_config.palace_path,
@@ -874,6 +882,7 @@ def tool_search(
         max_distance=dist,
         vector_disabled=_vector_disabled,
         collection_name=_config.collection_name,
+        candidate_strategy=strategy,
     )
     if _is_transient_index_error(result):
         # Post-bulk-write HNSW flush window (#1315): drop caches, give
@@ -890,6 +899,7 @@ def tool_search(
             n_results=limit,
             max_distance=dist,
             vector_disabled=_vector_disabled,
+            candidate_strategy=strategy,
         )
         if not _is_transient_index_error(result):
             result["index_recovered"] = True
@@ -926,9 +936,7 @@ def tool_search(
     # callers can render that case distinctly.
     if not result.get("error"):
         try:
-            kg_hits = _call_kg(
-                lambda kg: kg.search_entities(sanitized["clean_query"], limit=limit)
-            )
+            kg_hits = _call_kg(lambda kg: kg.search_entities(sanitized["clean_query"], limit=limit))
             if kg_hits:
                 result["kg_entities"] = kg_hits
                 if not (result.get("results") or []):
