@@ -673,6 +673,42 @@ def cmd_search(args):
         sys.exit(1)
 
 
+def cmd_hook_preview(args):
+    """Show what the prompt hook would inject for a prompt, in process."""
+    import json as _json
+
+    from .hooks_cli import _SEARCH_LIMIT, build_prompt_context
+    from .searcher import search_memories
+
+    palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+    if args.file:
+        with open(os.path.expanduser(args.file), encoding="utf-8") as fh:
+            prompt = fh.read()
+    else:
+        prompt = args.prompt or ""
+
+    def _search(query):
+        result = search_memories(
+            query,
+            palace_path=palace_path,
+            n_results=_SEARCH_LIMIT,
+            max_distance=0.0,
+            candidate_strategy=args.strategy,
+            recency_weight=args.recency,
+        )
+        return result.get("results", []) if isinstance(result, dict) else []
+
+    context, info = build_prompt_context(prompt, _search)
+    if args.json:
+        info["context"] = context
+        info["approx_tokens"] = len(context) // 4
+        print(_json.dumps(info, indent=2))
+    else:
+        print(f"# query ({info['method']}): {info['query']}")
+        print(context or "(nothing injected)")
+    return 0
+
+
 def cmd_wakeup(args):
     """Show L0 (identity) + L1 (essential story) — the wake-up context."""
     from .layers import MemoryStack
@@ -1419,6 +1455,26 @@ def main():
     p_search.add_argument("--room", default=None, help="Limit to one room")
     p_search.add_argument("--results", type=int, default=5, help="Number of results")
 
+    # hook-preview
+    p_hp = sub.add_parser(
+        "hook-preview", help="Show what the prompt hook would inject for a prompt"
+    )
+    p_hp.add_argument("prompt", nargs="?", default="", help="Prompt text")
+    p_hp.add_argument("--file", default=None, help="Read the prompt from a file")
+    p_hp.add_argument(
+        "--strategy",
+        choices=["vector", "union"],
+        default="union",
+        help="Candidate pool: vector only, or vector plus BM25 (default: union)",
+    )
+    p_hp.add_argument(
+        "--recency",
+        type=float,
+        default=None,
+        help="Date preference weight (default: MEMPALACE_RECENCY_WEIGHT, else 0)",
+    )
+    p_hp.add_argument("--json", action="store_true", help="Print query, counts and context")
+
     # compress
     p_compress = sub.add_parser(
         "compress", help="Compress drawers using AAAK Dialect (~30x reduction)"
@@ -1673,6 +1729,7 @@ def main():
         "mine": cmd_mine,
         "split": cmd_split,
         "search": cmd_search,
+        "hook-preview": cmd_hook_preview,
         "sweep": cmd_sweep,
         "sync": cmd_sync,
         "mcp": cmd_mcp,
