@@ -766,6 +766,7 @@ def _merge_bm25_union_candidates(
         return entry.get("source_file")
 
     seen = {_dedup_key(h) for h in hits}
+    added = []
     for bh in bm25_extra:
         key = _dedup_key(bh)
         if not key or key == "?" or key in seen:
@@ -774,7 +775,44 @@ def _merge_bm25_union_candidates(
         bh["effective_distance"] = None
         bh["closet_boost"] = 0.0
         hits.append(bh)
+        added.append(bh)
         seen.add(key)
+    _score_union_vectors(added, query, palace_path)
+
+
+def _score_union_vectors(added: list, query: str, palace_path: str) -> None:
+    """Give BM25-only union candidates a real vector distance.
+
+    Their stored embeddings are read back and compared with the query
+    embedding, so the hybrid rank weighs them like vector hits instead of
+    on BM25 alone. Fails soft: a candidate without an embedding keeps
+    ``distance=None``.
+    """
+    ids = [h.get("drawer_id") for h in added if h.get("drawer_id")]
+    if not ids:
+        return
+    try:
+        from .embedding import get_embedding_function
+
+        ef = get_embedding_function()
+        embed = getattr(ef, "embed_query", None) or ef
+        qv = [float(x) for x in embed([query])[0]]
+        got = get_collection(palace_path, create=False).get(ids=ids, include=["embeddings"])
+    except Exception:
+        logger.debug("union vector scoring failed", exc_info=True)
+        return
+    qn = math.sqrt(sum(x * x for x in qv)) or 1.0
+    vec_by_id = dict(zip(got.ids, got.embeddings or []))
+    for h in added:
+        v = vec_by_id.get(h.get("drawer_id"))
+        if v is None or len(v) != len(qv):
+            continue
+        v = [float(x) for x in v]
+        vn = math.sqrt(sum(x * x for x in v)) or 1.0
+        dist = 1.0 - sum(a * b for a, b in zip(qv, v)) / (qn * vn)
+        h["distance"] = round(dist, 4)
+        h["effective_distance"] = round(dist, 4)
+        h["similarity"] = round(max(0.0, 1.0 - dist), 3)
 
 
 # Strategy dispatch — keeps search_memories' branch count under the

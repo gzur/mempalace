@@ -251,3 +251,22 @@ def test_bm25_sqlite_matches_rare_key_term_past_common_words(tmp_path):
         "What was the fix for VICE-1624?", palace, n_results=5, max_candidates=20
     )
     assert any("VICE-1624" in h["text"] for h in r["results"])
+
+
+def test_union_candidates_get_vector_distance(tmp_path):
+    """BM25-only union hits are scored with their stored embeddings."""
+    palace = str(tmp_path / "palace")
+    col = get_collection(palace, create=True)
+    filler = [f"weather report number {i} about rain" for i in range(30)]
+    col.upsert(
+        ids=[f"F{i}" for i in range(30)] + ["K"],
+        documents=filler + ["VICE-1624: one grep exclude for .deploy in the drift check"],
+        metadatas=[{"wing": "w", "room": "r", "source_file": f"f{i}.txt"} for i in range(30)]
+        + [{"wing": "w", "room": "r", "source_file": "k.txt"}],
+    )
+    r = search_memories(
+        "What was the fix for VICE-1624?", palace, n_results=3, candidate_strategy="union"
+    )
+    top = r["results"][0]
+    assert "VICE-1624" in top["text"]
+    assert top["distance"] is not None
