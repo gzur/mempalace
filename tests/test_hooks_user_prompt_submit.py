@@ -139,53 +139,70 @@ def test_cwd_has_mempalace_mcp_false_on_malformed_json(tmp_path):
     assert hooks_cli._cwd_has_mempalace_mcp("/anywhere", config_path=config_path) is False
 
 
-# ── _format_smoke_signal ─────────────────────────────────────────────
+# ── _format_prompt_context ───────────────────────────────────────────
 
 
-def test_smoke_signal_format_single_candidate():
-    block = hooks_cli._format_smoke_signal(
+def test_prompt_context_shows_dated_snippet():
+    block = hooks_cli._format_prompt_context(
         [
             {
                 "drawer_id": "drawer_notes_journal_abc",
-                "wing": "notes",
-                "room": "journal",
                 "source_file": "2026-01-01-entry.md",
+                "source_date": "2026-01-01T10:00:00",
                 "similarity": 0.48,
+                "text": "noise line here\nVICE-1624 fix: one grep exclude for .deploy\nmore",
             }
-        ]
+        ],
+        ["VICE-1624"],
     )
-    assert "[palace: 1 candidates may be relevant" in block
-    assert "drawer_notes_journal_abc" in block
-    assert "notes/journal/2026-01-01-entry.md" in block
-    assert "sim 0.48" in block
+    assert block.startswith("[palace: 1 notes may relate")
+    assert "2026-01-01 (newest) · 2026-01-01-entry.md · drawer_notes_journal_abc" in block
+    assert "one grep exclude for .deploy" in block
+    assert "noise line here" not in block
     assert "mempalace_get_drawer" in block
 
 
-def test_smoke_signal_format_handles_missing_fields():
-    block = hooks_cli._format_smoke_signal([{"drawer_id": "x"}])
-    # No crash; defaults to "?"
-    assert "?/?/?" in block
-    assert "sim ?" in block
+def test_prompt_context_orders_newest_first_and_marks_older():
+    block = hooks_cli._format_prompt_context(
+        [
+            {"drawer_id": "old", "source_date": "2026-09-21T00:00:00", "text": "VICE-1 floor is 7"},
+            {"drawer_id": "new", "source_date": "2026-09-24T00:00:00", "text": "VICE-1 floor is 8"},
+            {"drawer_id": "nodate", "text": "something else entirely"},
+        ],
+        ["VICE-1"],
+    )
+    assert block.index("· new") < block.index("· old") < block.index("· nodate")
+    assert "2026-09-24 (newest)" in block
+    assert "2026-09-21 (older)" in block
+    assert "undated" in block
 
 
-def test_smoke_signal_format_stays_compact():
-    """Three full candidates should still fit comfortably under ~100 tokens.
-
-    Rough proxy: under 500 chars total. The point of the smoke signal is
-    that it costs almost nothing in main-session context.
-    """
+def test_prompt_context_stays_within_budget():
     candidates = [
-        {
-            "drawer_id": f"drawer_notes_room_{i:024x}",
-            "wing": "notes",
-            "room": "journal",
-            "source_file": "some-long-filename.md",
-            "similarity": 0.42,
-        }
-        for i in range(3)
+        {"drawer_id": f"d{i}", "source_date": f"2026-01-0{i + 1}T00:00:00", "text": "x " * 2000}
+        for i in range(5)
     ]
-    block = hooks_cli._format_smoke_signal(candidates)
-    assert len(block) < 500, f"smoke signal too large: {len(block)} chars"
+    block = hooks_cli._format_prompt_context(candidates, [])
+    assert len(block) <= hooks_cli._CONTEXT_CHAR_BUDGET + 200
+    assert block.count("\n- ") >= 3
+
+
+def test_build_prompt_context_searches_whole_prompt():
+    seen = {}
+
+    def fake_search(q):
+        seen["q"] = q
+        return [{"drawer_id": "a", "similarity": 0.6, "text": "VICE-2007 store note"}]
+
+    brief = (
+        "Task: VICE-2007 resolves a cluster's VMS endpoint only through the tenant store. "
+        + "Filler sentence that says nothing at all. " * 10
+        + "When done, send your result back to @dora via hcom."
+    )
+    text, info = hooks_cli.build_prompt_context(brief, fake_search)
+    assert "VICE-2007" in seen["q"] and "@dora" in seen["q"]
+    assert info["method"] == "key_terms+first+last"
+    assert "VICE-2007 store note" in text
 
 
 # ── hook_user_prompt_submit ─────────────────────────────────────────
@@ -277,7 +294,7 @@ def test_happy_path_emits_smoke_signal(
     assert "drawer_notes_meeting_notes_d642" in block
     # Sub-threshold candidate must NOT appear.
     assert "drawer_low_relevance" not in block
-    assert "2 candidates" in block
+    assert "2 notes may relate" in block
 
 
 def test_happy_path_uses_hook_specific_output_envelope(
@@ -373,7 +390,7 @@ def test_caps_at_max_candidates(stub_palace_root, cwd_with_mempalace, captured_o
     payload = captured_output["payload"]
     assert payload is not None
     block = payload["hookSpecificOutput"]["additionalContext"]
-    assert f"{hooks_cli._MAX_CANDIDATES} candidates" in block
+    assert f"{hooks_cli._MAX_CANDIDATES} notes may relate" in block
     # Beyond the cap should NOT appear.
     assert f"drawer_{hooks_cli._MAX_CANDIDATES}" not in block
 

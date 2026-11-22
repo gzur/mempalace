@@ -1081,19 +1081,98 @@ def _palace_search(query: str, client_tag: str) -> list[dict]:
     return results if isinstance(results, list) else []
 
 
-def _format_smoke_signal(candidates: list[dict]) -> str:
-    """Render the ~50-80 token candidate-locator block."""
-    lines = [f"[palace: {len(candidates)} candidates may be relevant to this prompt"]
-    for c in candidates:
-        drawer_id = c.get("drawer_id", "?")
-        wing = c.get("wing", "?")
-        room = c.get("room", "?")
-        source = c.get("source_file", "?")
-        sim = c.get("similarity")
-        sim_str = f"{sim:.2f}" if isinstance(sim, (int, float)) else "?"
-        lines.append(f" - {drawer_id} · {wing}/{room}/{source} · sim {sim_str}")
-    lines.append("Call mempalace_get_drawer with an ID to read in full.]")
+_CONTEXT_CHAR_BUDGET = 2400  # about 600 tokens for the whole block
+_SNIPPET_CHARS = 260  # 2-3 lines per drawer
+_WS = re.compile(r"\s+")
+
+
+def _snippet(text: str, terms: list[str], max_chars: int = _SNIPPET_CHARS) -> str:
+    """Pick the lines of ``text`` that hold a key term, else its first lines."""
+    lines = [_WS.sub(" ", ln).strip(" >#*-|`") for ln in (text or "").split("\n")]
+    lines = [ln for ln in lines if len(ln) >= 12]
+    lowered = [t.lower() for t in terms]
+    hits = [ln for ln in lines if any(t in ln.lower() for t in lowered)]
+    chosen = (hits or lines)[:3]
+    out = " / ".join(chosen)
+    if len(out) > max_chars:
+        out = out[: max_chars - 1].rsplit(" ", 1)[0] + "…"
+    return out
+
+
+def _format_prompt_context(candidates: list[dict], terms: list[str] = ()) -> str:
+    """Render short dated snippets, newest first, within the char budget.
+
+    Each drawer gets its session date, its source and 2-3 lines of text,
+    so the model sees the fact and its age without a follow-up call.
+    Newest first: when a later note corrects an earlier one, the
+    correction comes first, and the older note carries an "(older)" mark
+    if it shares a key term with a newer one.
+    """
+    terms = list(terms or [])
+    dated = sorted(
+        (c for c in candidates if c.get("source_date")),
+        key=lambda c: c["source_date"],
+        reverse=True,
+    )
+    undated = [c for c in candidates if not c.get("source_date")]
+    ordered = dated + undated
+    header = (
+        f"[palace: {len(ordered)} notes may relate to this prompt, newest first. "
+        "A newer note can replace an older one."
+    )
+    footer = "Call mempalace_get_drawer with an ID for the full text.]"
+    lines = [header]
+    used = len(header) + len(footer)
+    seen_terms: set = set()
+    shown = 0
+    for i, c in enumerate(ordered):
+        text = c.get("text") or ""
+        date = (c.get("source_date") or "undated")[:10]
+        mark = ""
+        own = {t.lower() for t in terms if t.lower() in text.lower()}
+        if i == 0 and c.get("source_date"):
+            mark = " (newest)"
+        elif own & seen_terms:
+            mark = " (older)"
+        seen_terms |= own
+        src = c.get("source_file", "?")
+        entry = f"- {date}{mark} · {src} · {c.get('drawer_id', '?')}\n  {_snippet(text, terms)}"
+        if used + len(entry) > _CONTEXT_CHAR_BUDGET and shown:
+            break
+        lines.append(entry)
+        used += len(entry)
+        shown += 1
+    lines[0] = lines[0].replace(f"{len(ordered)} notes", f"{shown} notes", 1)
+    lines.append(footer)
     return "\n".join(lines)
+
+
+def _is_candidate(r) -> bool:
+    """A vector hit above the threshold, or a keyword-only hit with a BM25 score."""
+    if not isinstance(r, dict):
+        return False
+    sim = r.get("similarity")
+    if isinstance(sim, (int, float)):
+        return sim > _SIMILARITY_THRESHOLD
+    return sim is None and bool(r.get("bm25_score"))
+
+
+def build_prompt_context(prompt: str, search_fn) -> tuple[str, dict]:
+    """Return ``(context_text, info)`` for ``prompt`` using ``search_fn``.
+
+    ``search_fn(query) -> list[dict]`` is the daemon call in the live hook
+    and an in-process search in ``mempalace hook-preview``. ``info`` holds
+    the query and counts for logs and tests.
+    """
+    from .query_sanitizer import build_prompt_query
+
+    built = build_prompt_query(prompt)
+    results = search_fn(built["query"])
+    candidates = [r for r in results if _is_candidate(r)][:_MAX_CANDIDATES]
+    info = {"query": built["query"], "method": built["method"], "results": len(results)}
+    if not candidates:
+        return "", info
+    return _format_prompt_context(candidates, built["key_terms"]), info
 
 
 def hook_user_prompt_submit(data: dict, harness: str):
@@ -1148,21 +1227,14 @@ def hook_user_prompt_submit(data: dict, harness: str):
 
     # ── Search + filter ──────────────────────────────────────────────
     client_tag = _client_tag_for_cwd(cwd)
-    results = _palace_search(prompt, client_tag)
-    candidates = [
-        r
-        for r in results
-        if isinstance(r, dict)
-        and isinstance(r.get("similarity"), (int, float))
-        and r["similarity"] > _SIMILARITY_THRESHOLD
-    ][:_MAX_CANDIDATES]
+    context, info = build_prompt_context(prompt, lambda q: _palace_search(q, client_tag))
 
-    if not candidates:
-        _log(f"user-prompt-submit: empty (search returned {len(results)}, none above threshold)")
+    if not context:
+        _log(f"user-prompt-submit: empty (search returned {info['results']}, none above threshold)")
         _output({})
         return
 
-    _log(f"user-prompt-submit: matched {len(candidates)} candidates for {cwd}")
+    _log(f"user-prompt-submit: matched for {cwd} (query method {info['method']})")
     # Claude Code only honors injected context under the nested
     # hookSpecificOutput envelope; a bare top-level "additionalContext"
     # parses cleanly but is silently dropped.
@@ -1170,7 +1242,7 @@ def hook_user_prompt_submit(data: dict, harness: str):
         {
             "hookSpecificOutput": {
                 "hookEventName": "UserPromptSubmit",
-                "additionalContext": _format_smoke_signal(candidates),
+                "additionalContext": context,
             }
         }
     )
