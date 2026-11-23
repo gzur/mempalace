@@ -17,7 +17,7 @@ from datetime import datetime
 from collections import defaultdict
 
 from .backends.chroma import refuse_if_diverged
-from .normalize import normalize
+from .normalize import normalize_with_times
 from .palace import (
     NORMALIZE_VERSION,
     SKIP_DIRS,
@@ -100,21 +100,47 @@ def _register_file(collection, source_file: str, wing: str, agent: str):
 # =============================================================================
 
 
-def chunk_exchanges(content: str) -> list:
+def chunk_exchanges(content: str, with_lines: bool = False) -> list:
     """
     Chunk by exchange pair: one > turn + AI response = one unit.
     Falls back to paragraph chunking if no > markers.
+
+    With ``with_lines=True``, each exchange chunk also gets ``lines``:
+    the ``(first, last)`` indices of the ``content`` lines it holds, so
+    the miner can date it from the source records of those lines.
     """
     lines = content.split("\n")
     quote_lines = sum(1 for line in lines if line.strip().startswith(">"))
 
     if quote_lines >= 3:
-        return _chunk_by_exchange(lines)
-    else:
-        return _chunk_by_paragraph(content)
+        return _chunk_by_exchange(lines, with_lines=with_lines)
+    chunks = _chunk_by_paragraph(content)
+    if with_lines:
+        _locate_lines(content, chunks)
+    return chunks
 
 
-def _chunk_by_exchange(lines: list) -> list:
+def _locate_lines(content: str, chunks: list) -> None:
+    """Set ``lines`` on chunks that are verbatim slices of ``content``, in order."""
+    cursor, line_no = 0, 0
+    for chunk in chunks:
+        text = chunk["content"]
+        pos = content.find(text, cursor)
+        if pos < 0:
+            continue
+        line_no += content.count("\n", cursor, pos)
+        last = line_no + text.count("\n")
+        chunk["lines"] = (line_no, last)
+        cursor, line_no = pos, line_no
+
+
+def _span_lines(pieces: list, start: int, end: int) -> tuple:
+    """Return the first and last line index of ``pieces`` that overlap ``[start, end)``."""
+    hit = [idx for idx, a, b in pieces if a < end and b > start]
+    return (hit[0], hit[-1]) if hit else (pieces[0][0], pieces[0][0])
+
+
+def _chunk_by_exchange(lines: list, with_lines: bool = False) -> list:
     """One user turn (>) + the AI response that follows = one or more chunks.
 
     The full AI response is preserved verbatim.  When the combined
@@ -124,10 +150,19 @@ def _chunk_by_exchange(lines: list) -> list:
     chunks = []
     i = 0
 
+    def _add(text, pieces, start):
+        chunk = {"content": text, "chunk_index": len(chunks)}
+        if with_lines:
+            chunk["lines"] = _span_lines(pieces, start, start + len(text))
+        chunks.append(chunk)
+
     while i < len(lines):
         line = lines[i]
         if line.strip().startswith(">"):
             user_turn = line.strip()
+            # (line index, start, end) of each piece inside ``content``
+            pieces = [(i, 0, len(user_turn))]
+            pos = len(user_turn) + 1
             i += 1
 
             ai_lines = []
@@ -136,7 +171,10 @@ def _chunk_by_exchange(lines: list) -> list:
                 if next_line.strip().startswith(">") or next_line.strip().startswith("---"):
                     break
                 if next_line.strip():
-                    ai_lines.append(next_line.strip())
+                    piece = next_line.strip()
+                    ai_lines.append(piece)
+                    pieces.append((i, pos, pos + len(piece)))
+                    pos += len(piece) + 1
                 i += 1
 
             ai_response = " ".join(ai_lines)
@@ -147,21 +185,18 @@ def _chunk_by_exchange(lines: list) -> list:
                 # First chunk: user turn + as much response as fits
                 first_part = content[:CHUNK_SIZE]
                 if len(first_part.strip()) > MIN_CHUNK_SIZE:
-                    chunks.append({"content": first_part, "chunk_index": len(chunks)})
+                    _add(first_part, pieces, 0)
                 # Remaining response in CHUNK_SIZE-sized continuation drawers
+                offset = CHUNK_SIZE
                 remainder = content[CHUNK_SIZE:]
                 while remainder:
                     part = remainder[:CHUNK_SIZE]
                     remainder = remainder[CHUNK_SIZE:]
                     if len(part.strip()) > MIN_CHUNK_SIZE:
-                        chunks.append({"content": part, "chunk_index": len(chunks)})
+                        _add(part, pieces, offset)
+                    offset += CHUNK_SIZE
             elif len(content.strip()) > MIN_CHUNK_SIZE:
-                chunks.append(
-                    {
-                        "content": content,
-                        "chunk_index": len(chunks),
-                    }
-                )
+                _add(content, pieces, 0)
         else:
             i += 1
 
@@ -360,20 +395,41 @@ def _message_timestamps(filepath) -> list:
     return out
 
 
-def _date_chunks(chunks: list, timestamps: list) -> None:
+def _date_chunks(chunks: list, timestamps: list, line_times: list = None) -> None:
     """Set ``source_date`` on each chunk from the transcript timestamps.
 
-    Chunks come in transcript order, so chunk ``i`` of ``n`` gets the
-    timestamp at the same relative position. The date is an estimate
-    inside one session; ``session_end`` (the last timestamp) is exact.
+    With ``line_times`` (one source time per content line, from
+    :func:`normalize.normalize_with_times`) a chunk that carries ``lines``
+    gets the exact time of its first source record as ``source_date``
+    and of its last as ``source_date_end``; ``date_source`` is
+    ``"record"``. Other chunks fall back to the estimate: chunk ``i`` of
+    ``n`` gets the timestamp at the same relative position
+    (``date_source`` ``"estimate"``). ``session_end`` is always the last
+    timestamp of the file.
     """
-    if not timestamps or not chunks:
+    if not chunks:
         return
+    end = timestamps[-1] if timestamps else None
+    if line_times:
+        nonempty = [t for t in line_times if t]
+        end = max(nonempty) if nonempty else end
     n, m = len(chunks), len(timestamps)
     for i, chunk in enumerate(chunks):
-        pos = min(m - 1, int((i + 0.5) * m / n))
-        chunk["source_date"] = timestamps[pos]
-        chunk["session_end"] = timestamps[-1]
+        span = chunk.pop("lines", None)
+        own = []
+        if line_times and span:
+            own = [t for t in line_times[span[0] : span[1] + 1] if t]
+        if own:
+            chunk["source_date"] = min(own)
+            chunk["source_date_end"] = max(own)
+            chunk["date_source"] = "record"
+        elif m:
+            pos = min(m - 1, int((i + 0.5) * m / n))
+            chunk["source_date"] = timestamps[pos]
+            chunk["date_source"] = "estimate"
+        else:
+            continue
+        chunk["session_end"] = end or chunk["source_date"]
 
 
 def _file_chunks_locked(collection, source_file, chunks, wing, room, agent, extract_mode):
@@ -434,6 +490,12 @@ def _file_chunks_locked(collection, source_file, chunks, wing, room, agent, extr
                             {
                                 "source_date": chunk["source_date"],
                                 "session_end": chunk["session_end"],
+                                "date_source": chunk.get("date_source", "estimate"),
+                                **(
+                                    {"source_date_end": chunk["source_date_end"]}
+                                    if chunk.get("source_date_end")
+                                    else {}
+                                ),
                             }
                             if chunk.get("source_date")
                             else {}
@@ -525,7 +587,7 @@ def mine_convos(
 
         # Normalize format
         try:
-            content = normalize(str(filepath))
+            content, line_times = normalize_with_times(str(filepath))
         except (OSError, ValueError):
             if not dry_run:
                 _register_file(collection, source_file, wing, agent)
@@ -543,9 +605,9 @@ def mine_convos(
             chunks = extract_memories(content)
             # Each chunk already has memory_type; use it as the room name
         else:
-            chunks = chunk_exchanges(content)
+            chunks = chunk_exchanges(content, with_lines=line_times is not None)
 
-        _date_chunks(chunks, _message_timestamps(filepath))
+        _date_chunks(chunks, _message_timestamps(filepath), line_times)
 
         if not chunks:
             if not dry_run:

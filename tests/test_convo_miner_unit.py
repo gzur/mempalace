@@ -1,6 +1,7 @@
 """Unit tests for convo_miner pure functions (no chromadb needed)."""
 
 import contextlib
+from pathlib import Path
 
 from mempalace.convo_miner import (
     _file_chunks_locked,
@@ -207,6 +208,118 @@ def test_date_chunks_spreads_timestamps_in_order():
         "2026-01-02",
     ]
     assert all(c["session_end"] == "2026-01-02T00:00:00" for c in chunks)
+    assert all(c["date_source"] == "estimate" for c in chunks)
     empty = [{"content": "x"}]
     _date_chunks(empty, [])
     assert "source_date" not in empty[0]
+
+
+FIXTURE = Path(__file__).parent / "fixtures" / "claude_session_dated.jsonl"
+
+
+def test_normalize_with_times_matches_normalize_and_dates_each_line():
+    from mempalace.normalize import normalize, normalize_with_times
+
+    content, times = normalize_with_times(str(FIXTURE))
+    assert content == normalize(str(FIXTURE))
+    lines = content.split("\n")
+    assert len(times) == len(lines)
+    by_line = dict(zip(lines, times))
+    assert by_line["> What is the minimum cluster floor on Azure for the shrink path?"] == (
+        "2026-09-01T09:00:00"
+    )
+    assert by_line[
+        "> Make the nightly job block the pipeline now, please, with the ticket VICE-2192."
+    ] == ("2026-09-17T15:00:00")
+    # separator lines carry no time
+    assert all(t is None for line, t in zip(lines, times) if line == "")
+
+
+def test_normalize_with_times_is_none_for_plain_text(tmp_path):
+    from mempalace.normalize import normalize_with_times
+
+    f = tmp_path / "chat.txt"
+    f.write_text("> one question here\nanswer\n\n> two\nb\n\n> three\nc\n", encoding="utf-8")
+    content, times = normalize_with_times(str(f))
+    assert times is None
+    assert content.startswith("> one question")
+
+
+def test_drawer_dates_come_from_their_own_records():
+    """The position estimate puts exchange 1 on 2026-09-02; the record says 09-01."""
+    from mempalace.convo_miner import _date_chunks, _message_timestamps, chunk_exchanges
+    from mempalace.normalize import normalize_with_times
+
+    content, times = normalize_with_times(str(FIXTURE))
+    chunks = chunk_exchanges(content, with_lines=True)
+    estimate = [dict(c) for c in chunks]
+    for c in estimate:
+        c.pop("lines")
+    _date_chunks(estimate, _message_timestamps(FIXTURE))
+    assert estimate[0]["source_date"][:10] != "2026-09-01"  # the old bug
+
+    _date_chunks(chunks, _message_timestamps(FIXTURE), times)
+    got = [(c["source_date"], c.get("source_date_end"), c["date_source"]) for c in chunks]
+    assert got == [
+        ("2026-09-01T09:00:00", "2026-09-01T09:00:30", "record"),
+        ("2026-09-02T10:00:00", "2026-09-02T10:01:00", "record"),
+        ("2026-09-17T15:00:00", "2026-09-17T15:30:00", "record"),
+    ]
+    assert all(c["session_end"] == "2026-09-17T15:30:00" for c in chunks)
+    assert all("lines" not in c for c in chunks)
+
+
+def test_long_exchange_split_dates_each_part_from_its_lines():
+    from mempalace.convo_miner import _date_chunks, chunk_exchanges
+
+    body = [f"line {i} " + "x" * 300 for i in range(4)]
+    content = (
+        "> question one about the floor\n"
+        + "\n".join(body)
+        + "\n\n> q2 is here now\nok fine answer\n\n> q3 is here now\nok"
+    )
+    times = ["2026-01-01T00:00:00"] + [f"2026-01-0{i + 2}T00:00:00" for i in range(4)]
+    times += [None, "2026-02-01T00:00:00", "2026-02-01T00:00:01", None, "2026-03-01T00:00:00", "x"]
+    times = times[: content.count("\n") + 1]
+    chunks = chunk_exchanges(content, with_lines=True)
+    _date_chunks(chunks, [], times)
+    assert chunks[0]["source_date"] == "2026-01-01T00:00:00"
+    # the continuation drawer starts inside the later lines, not at the user turn
+    assert chunks[1]["source_date"] > "2026-01-02"
+    assert chunks[1]["date_source"] == "record"
+
+
+def test_paragraph_chunks_get_record_dates(tmp_path):
+    from mempalace.convo_miner import _date_chunks, chunk_exchanges
+
+    content = "first paragraph of the plan, long enough\n\nsecond paragraph with more words here"
+    times = ["2026-05-01T00:00:00", None, "2026-05-03T00:00:00"]
+    chunks = chunk_exchanges(content, with_lines=True)
+    _date_chunks(chunks, [], times)
+    assert [c["source_date"] for c in chunks] == ["2026-05-01T00:00:00", "2026-05-03T00:00:00"]
+
+
+def test_mine_convos_stores_record_dates(tmp_path):
+    import shutil
+
+    import chromadb
+
+    from mempalace.convo_miner import mine_convos
+
+    src = tmp_path / "src"
+    src.mkdir()
+    shutil.copy(FIXTURE, src / "session.jsonl")
+    palace = tmp_path / "palace"
+    mine_convos(str(src), str(palace), wing="t")
+    col = chromadb.PersistentClient(path=str(palace)).get_collection("mempalace_drawers")
+    metas = [
+        m for m in col.get(include=["metadatas"])["metadatas"] if m.get("chunk_index") is not None
+    ]
+    dated = sorted(
+        (m["chunk_index"], m["source_date"], m["date_source"]) for m in metas if "source_date" in m
+    )
+    assert dated == [
+        (0, "2026-09-01T09:00:00", "record"),
+        (1, "2026-09-02T10:00:00", "record"),
+        (2, "2026-09-17T15:00:00", "record"),
+    ]

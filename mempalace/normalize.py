@@ -47,6 +47,9 @@ _NOISE_TAGS = (
 )
 
 
+_ISO_TS = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d")
+
+
 def _tag_pattern(name: str) -> "re.Pattern[str]":
     # Opening tag must begin a line (optionally after a `> ` blockquote marker,
     # since _messages_to_transcript prefixes lines with `> `). Body is lazy but
@@ -177,9 +180,33 @@ def _try_normalize_json(content: str) -> Optional[str]:
 
 def _try_claude_code_jsonl(content: str) -> Optional[str]:
     """Claude Code JSONL sessions."""
+    messages = _claude_code_messages(content)
+    if len(messages) >= 2:
+        return _messages_to_transcript([(role, text) for role, text, _ in messages])
+    return None
+
+
+def _entry_time(entry: dict) -> Optional[str]:
+    ts = entry.get("timestamp")
+    if isinstance(ts, str) and _ISO_TS.match(ts):
+        return ts[:19]
+    return None
+
+
+def _claude_code_messages(content: str) -> list:
+    """Parse Claude Code JSONL into ``[(role, text, segments), ...]``.
+
+    ``segments`` is a list of ``(line_count, timestamp)``, one per JSONL
+    record merged into the message, in order. It lets the miner date each
+    transcript line from the record it came from.
+    """
     lines = [line.strip() for line in content.strip().split("\n") if line.strip()]
     messages = []
     tool_use_map = {}  # tool_use_id → tool_name
+
+    def _merge(text, ts):
+        role, prev_text, segs = messages[-1]
+        messages[-1] = (role, prev_text + "\n" + text, segs + [(text.count("\n") + 1, ts)])
 
     for line in lines:
         try:
@@ -193,6 +220,7 @@ def _try_claude_code_jsonl(content: str) -> Optional[str]:
         if not isinstance(message, dict):
             continue
         msg_content = message.get("content", "")
+        ts = _entry_time(entry)
 
         # Build tool_use_map from assistant messages
         if msg_type == "assistant" and isinstance(msg_content, list):
@@ -215,10 +243,9 @@ def _try_claude_code_jsonl(content: str) -> Optional[str]:
             if text:
                 if is_tool_only and messages and messages[-1][0] == "assistant":
                     # Append tool results to the previous assistant message
-                    prev_role, prev_text = messages[-1]
-                    messages[-1] = (prev_role, prev_text + "\n" + text)
+                    _merge(text, ts)
                 elif not is_tool_only:
-                    messages.append(("user", text))
+                    messages.append(("user", text, [(text.count("\n") + 1, ts)]))
         elif msg_type == "assistant":
             text = _extract_content(msg_content, tool_use_map=tool_use_map)
             if text:
@@ -227,14 +254,38 @@ def _try_claude_code_jsonl(content: str) -> Optional[str]:
                 # If previous message is also assistant (multi-turn tool loop),
                 # merge into the same assistant turn
                 if messages and messages[-1][0] == "assistant":
-                    prev_role, prev_text = messages[-1]
-                    messages[-1] = (prev_role, prev_text + "\n" + text)
+                    _merge(text, ts)
                 else:
-                    messages.append(("assistant", text))
+                    messages.append(("assistant", text, [(text.count("\n") + 1, ts)]))
+    return messages
 
-    if len(messages) >= 2:
-        return _messages_to_transcript(messages)
-    return None
+
+def normalize_with_times(filepath: str) -> tuple:
+    """Like :func:`normalize`, plus the source time of each output line.
+
+    Returns ``(content, line_times)``. ``line_times[i]`` is the ISO time
+    (``YYYY-MM-DDTHH:MM:SS``) of the JSONL record that line ``i`` of
+    ``content`` came from, or ``None`` for a separator line or a record
+    with no ``timestamp``. ``line_times`` is ``None`` when the file is
+    not a Claude Code JSONL session; ``content`` is then what
+    :func:`normalize` returns.
+    """
+    if str(filepath).lower().endswith(".jsonl"):
+        try:
+            if os.path.getsize(filepath) <= 500 * 1024 * 1024:
+                with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+                    raw = f.read()
+                lines = raw.split("\n")
+                # Same order as normalize(): ">" text passes through first.
+                if raw.strip() and sum(1 for ln in lines if ln.strip().startswith(">")) < 3:
+                    messages = _claude_code_messages(raw)
+                    if len(messages) >= 2:
+                        content, times = _messages_to_transcript_timed(messages)
+                        if len(times) == content.count("\n") + 1:
+                            return content, times
+        except OSError:
+            pass
+    return normalize(filepath), None
 
 
 def _try_codex_jsonl(content: str) -> Optional[str]:
@@ -627,6 +678,56 @@ def _format_tool_result(content, tool_name: str) -> str:
     if len(text) > _TOOL_RESULT_MAX_BYTES:
         return "→ " + text[:_TOOL_RESULT_MAX_BYTES] + f"... [truncated, {len(text)} chars]"
     return "→ " + text
+
+
+def _segment_times(text: str, segs: list) -> list:
+    """Expand ``(line_count, ts)`` segments to one time per line of ``text``."""
+    times = [ts for n, ts in segs for _ in range(n)]
+    want = text.count("\n") + 1
+    if len(times) != want:
+        # Spellcheck changed the line count: date every line by the first record.
+        first = next((ts for _, ts in segs if ts), None)
+        times = [first] * want
+    return times
+
+
+def _messages_to_transcript_timed(messages: list) -> tuple:
+    """:func:`_messages_to_transcript` for ``(role, text, segments)`` messages.
+
+    Returns ``(transcript, line_times)`` with one time per transcript line.
+    The user text goes through the same spellcheck, and the line times
+    follow the corrected text.
+    """
+    try:
+        from mempalace.spellcheck import spellcheck_user_text as _fix
+    except ImportError:
+        _fix = None
+
+    lines: list = []
+    times: list = []
+
+    def _add(text, segs):
+        lines.append(text)
+        times.extend(_segment_times(text, segs))
+
+    i = 0
+    while i < len(messages):
+        role, text, segs = messages[i]
+        if role == "user":
+            if _fix is not None:
+                text = _fix(text)
+            _add(f"> {text}", segs)
+            if i + 1 < len(messages) and messages[i + 1][0] == "assistant":
+                _add(messages[i + 1][1], messages[i + 1][2])
+                i += 2
+            else:
+                i += 1
+        else:
+            _add(text, segs)
+            i += 1
+        lines.append("")
+        times.append(None)
+    return "\n".join(lines), times
 
 
 def _messages_to_transcript(messages: list, spellcheck: bool = True) -> str:
