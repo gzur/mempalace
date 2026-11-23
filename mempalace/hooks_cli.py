@@ -1099,7 +1099,15 @@ def _snippet(text: str, terms: list[str], max_chars: int = _SNIPPET_CHARS) -> st
     return out
 
 
-def _format_prompt_context(candidates: list[dict], terms: list[str] = ()) -> str:
+_PROMPT_HEADER = (
+    "[palace: {n} notes may relate to this prompt, newest first. "
+    "A newer note can replace an older one."
+)
+
+
+def _format_prompt_context(
+    candidates: list[dict], terms: list[str] = (), header: str = _PROMPT_HEADER
+) -> str:
     """Render short dated snippets, newest first, within the char budget.
 
     Each drawer gets its session date, its source and 2-3 lines of text,
@@ -1116,10 +1124,8 @@ def _format_prompt_context(candidates: list[dict], terms: list[str] = ()) -> str
     )
     undated = [c for c in candidates if not c.get("source_date")]
     ordered = dated + undated
-    header = (
-        f"[palace: {len(ordered)} notes may relate to this prompt, newest first. "
-        "A newer note can replace an older one."
-    )
+    template = header
+    header = template.format(n=len(ordered))
     footer = "Call mempalace_get_drawer with an ID for the full text.]"
     lines = [header]
     used = len(header) + len(footer)
@@ -1142,7 +1148,7 @@ def _format_prompt_context(candidates: list[dict], terms: list[str] = ()) -> str
         lines.append(entry)
         used += len(entry)
         shown += 1
-    lines[0] = lines[0].replace(f"{len(ordered)} notes", f"{shown} notes", 1)
+    lines[0] = template.format(n=shown)
     lines.append(footer)
     return "\n".join(lines)
 
@@ -1157,22 +1163,57 @@ def _is_candidate(r) -> bool:
     return sim is None and bool(r.get("bm25_score"))
 
 
-def build_prompt_context(prompt: str, search_fn) -> tuple[str, dict]:
+def build_prompt_context(prompt: str, search_fn, exclude_ids=()) -> tuple[str, dict]:
     """Return ``(context_text, info)`` for ``prompt`` using ``search_fn``.
 
     ``search_fn(query) -> list[dict]`` is the daemon call in the live hook
     and an in-process search in ``mempalace hook-preview``. ``info`` holds
-    the query and counts for logs and tests.
+    the query and counts for logs and tests. Drawers in ``exclude_ids``
+    (already shown by the wake-up block) are left out.
     """
     from .query_sanitizer import build_prompt_query
 
     built = build_prompt_query(prompt)
     results = search_fn(built["query"])
-    candidates = [r for r in results if _is_candidate(r)][:_MAX_CANDIDATES]
+    skip = set(exclude_ids or ())
+    candidates = [r for r in results if _is_candidate(r) and r.get("drawer_id") not in skip][
+        :_MAX_CANDIDATES
+    ]
     info = {"query": built["query"], "method": built["method"], "results": len(results)}
     if not candidates:
         return "", info
     return _format_prompt_context(candidates, built["key_terms"]), info
+
+
+def _task_wakeup_enabled() -> bool:
+    return os.environ.get("MEMPALACE_TASK_WAKEUP", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _first_prompt_wakeup(data: dict, harness: str, cwd: str, prompt: str, search_fn) -> tuple:
+    """Return ``(text, drawer_ids)`` for the task wake-up, once per session.
+
+    Off unless ``MEMPALACE_TASK_WAKEUP=1``. On the first prompt of a
+    session it builds the block from the cwd, the git branch and the
+    prompt (:mod:`mempalace.wakeup`) and writes a marker in
+    ``STATE_DIR`` so later prompts skip it. Never raises.
+    """
+    if not _task_wakeup_enabled():
+        return "", []
+    try:
+        from .wakeup import build_task_wakeup, task_signals
+
+        session_id = _sanitize_session_id(_parse_harness_input(data, harness)["session_id"])
+        marker = STATE_DIR / f"wakeup-{session_id}"
+        if marker.exists():
+            return "", []
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+        text, info = build_task_wakeup(task_signals(cwd, prompt=prompt), search_fn)
+        _log(f"task wake-up: {len(info.get('drawer_ids', []))} drawers, queries {info['queries']}")
+        return text, info.get("drawer_ids", [])
+    except Exception as e:  # the hook must never block a prompt
+        _log(f"task wake-up failed: {e}")
+        return "", []
 
 
 def hook_user_prompt_submit(data: dict, harness: str):
@@ -1227,7 +1268,11 @@ def hook_user_prompt_submit(data: dict, harness: str):
 
     # ── Search + filter ──────────────────────────────────────────────
     client_tag = _client_tag_for_cwd(cwd)
-    context, info = build_prompt_context(prompt, lambda q: _palace_search(q, client_tag))
+    search = lambda q: _palace_search(q, client_tag)  # noqa: E731
+    wakeup, shown = _first_prompt_wakeup(data, harness, cwd, prompt, search)
+    context, info = build_prompt_context(prompt, search, exclude_ids=shown)
+    if wakeup:
+        context = wakeup + ("\n" + context if context else "")
 
     if not context:
         _log(f"user-prompt-submit: empty (search returned {info['results']}, none above threshold)")

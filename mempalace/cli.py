@@ -709,11 +709,49 @@ def cmd_hook_preview(args):
     return 0
 
 
+def _cmd_task_wakeup(args, palace_path):
+    """``mempalace wake-up --task``: the task-aware block, searched in process."""
+    import json as _json
+
+    from .searcher import search_memories
+    from .wakeup import build_task_wakeup, task_signals
+
+    prompt = args.prompt or ""
+    if args.prompt_file:
+        with open(os.path.expanduser(args.prompt_file), encoding="utf-8") as fh:
+            prompt = fh.read()
+    cwd = os.path.expanduser(args.cwd) if args.cwd else os.getcwd()
+    pool = 30 if args.before else 8
+
+    def _search(query):
+        result = search_memories(
+            query,
+            palace_path=palace_path,
+            n_results=pool,
+            max_distance=0.0 if args.strategy == "union" else 1.5,
+            candidate_strategy=args.strategy,
+            recency_weight=args.recency,
+        )
+        return result.get("results", []) if isinstance(result, dict) else []
+
+    signals = task_signals(cwd, branch=args.branch, prompt=prompt)
+    text, info = build_task_wakeup(signals, _search, before=args.before)
+    if args.json:
+        info["context"] = text
+        print(_json.dumps(info, indent=2))
+    else:
+        print(f"# queries: {info['queries']}")
+        print(text or "(nothing to show)")
+    return 0
+
+
 def cmd_wakeup(args):
     """Show L0 (identity) + L1 (essential story) — the wake-up context."""
     from .layers import MemoryStack
 
     palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+    if getattr(args, "task", False):
+        return _cmd_task_wakeup(args, palace_path)
     stack = MemoryStack(palace_path=palace_path)
 
     text = stack.wake_up(wing=args.wing)
@@ -1490,6 +1528,25 @@ def main():
     # wake-up
     p_wakeup = sub.add_parser("wake-up", help="Show L0 + L1 wake-up context (~600-900 tokens)")
     p_wakeup.add_argument("--wing", default=None, help="Wake-up for a specific project/wing")
+    p_wakeup.add_argument(
+        "--task",
+        action="store_true",
+        help="Task-aware wake-up: recent drawers for the cwd, git branch and first prompt",
+    )
+    p_wakeup.add_argument("--cwd", default=None, help="Session directory (default: current)")
+    p_wakeup.add_argument("--branch", default=None, help="Git branch (default: read from --cwd)")
+    p_wakeup.add_argument("--prompt", default=None, help="First prompt of the session")
+    p_wakeup.add_argument("--prompt-file", default=None, help="Read the first prompt from a file")
+    p_wakeup.add_argument(
+        "--before", default=None, help="Only drawers dated before this ISO time (fair tests)"
+    )
+    p_wakeup.add_argument(
+        "--strategy", choices=["vector", "union"], default="union", help="Candidate strategy"
+    )
+    p_wakeup.add_argument("--recency", type=float, default=0.1, help="Recency weight")
+    p_wakeup.add_argument(
+        "--json", action="store_true", help="Print the queries and drawer IDs as JSON"
+    )
 
     # split
     p_split = sub.add_parser(
