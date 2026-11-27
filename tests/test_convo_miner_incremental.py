@@ -198,6 +198,25 @@ def test_grown_last_exchange_refreshes_its_drawer(convo, capsys):
     assert any("Also a tail." in d for d in docs)
 
 
+def test_empty_then_grown_file_drops_its_sentinel(tmp_path, capsys):
+    """A file too short at its first mine gets a sentinel; real drawers replace it."""
+    src = tmp_path / "src"
+    src.mkdir()
+    f = (src / "session.txt").resolve()
+    f.write_text("hi\n")
+    palace = tmp_path / "palace"
+    _mine(src, palace, capsys)
+    col = chromadb.PersistentClient(path=str(palace)).get_collection("mempalace_drawers")
+    assert col.get(where={"source_file": str(f)})["ids"][0].startswith("_reg_")
+
+    with open(f, "a") as fh:
+        fh.write("> What is memory?\nMemory is persistence of the exact words.\n\n" * 3)
+    out = _mine(src, palace, capsys)
+    ids = col.get(where={"source_file": str(f)})["ids"]
+    assert _filed(out) == len(ids) > 0
+    assert not any(i.startswith("_reg_") for i in ids)
+
+
 def test_mine_plan(tmp_path):
     f = tmp_path / "a.jsonl"
     f.write_text("one\n")

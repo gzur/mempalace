@@ -70,6 +70,10 @@ MAX_FILE_SIZE = 500 * 1024 * 1024  # 500 MB — skip files larger than this.
 # use also scales with source size.
 
 
+def _registry_id(source_file: str) -> str:
+    return f"_reg_{hashlib.sha256(source_file.encode()).hexdigest()[:24]}"
+
+
 def _register_file(collection, source_file: str, wing: str, agent: str):
     """Write a sentinel so file_already_mined() returns True for 0-chunk files.
 
@@ -77,7 +81,7 @@ def _register_file(collection, source_file: str, wing: str, agent: str):
     re-read and re-processed on every mine run because nothing was written to
     ChromaDB on the first pass.
     """
-    sentinel_id = f"_reg_{hashlib.sha256(source_file.encode()).hexdigest()[:24]}"
+    sentinel_id = _registry_id(source_file)
     collection.upsert(
         documents=[f"[registry] {source_file}"],
         ids=[sentinel_id],
@@ -639,15 +643,21 @@ def _file_chunks_locked(
                 meta = dict(old[2])
                 fresh = _drawer_meta(chunk, source_file, chunk_room, wing, agent, extract_mode, "")
                 if any(meta.get(k) != fresh.get(k) for k in _DATE_KEYS):
+                    # Chroma merges an update into the stored metadata; a
+                    # None value deletes the key that the chunk lost.
                     for k in _DATE_KEYS:
-                        if k in fresh:
-                            meta[k] = fresh[k]
+                        meta[k] = fresh.get(k)
                     refresh_ids.append(did)
                     refresh_metas.append(meta)
                 continue
             to_file.append((did, chunk_room, chunk))
 
         stale = [old[0] for old in existing.values() if old[0] not in new_ids]
+        if chunks:
+            # A file that once had too little content got a registry
+            # sentinel. It has real drawers now: the sentinel must go, or
+            # its "[registry] PATH" text stays searchable.
+            stale.append(_registry_id(source_file))
         if stale:
             collection.delete(ids=stale)
         for start in range(0, len(refresh_ids), DRAWER_UPSERT_BATCH_SIZE):
