@@ -96,6 +96,110 @@ def _register_file(collection, source_file: str, wing: str, agent: str):
 
 
 # =============================================================================
+# INCREMENTAL STATE — what each transcript looked like at its last mine
+# =============================================================================
+#
+# A live transcript grows: Claude Code appends records to the session JSONL.
+# The miner keeps, per source file, the inode, the byte size (the offset up to
+# which the file is mined) and a hash of the bytes just before that offset. On
+# the next mine:
+#
+#   same inode, same size, same probe      -> skip (only the mtime moved)
+#   same inode, larger, same probe at the
+#   old offset                             -> grow: file the new chunks only
+#   other inode, smaller, or probe changed -> rewrite: mine the file whole
+#
+# A grown file is still normalized and chunked whole (cheap); the miner then
+# compares the chunks with the drawers it holds and embeds only the chunks that
+# are new or changed. Drawer ids stay stable because they hash the source path
+# and the chunk index, and the room of the file is kept from its first mine.
+
+CONVO_STATE_FILE = "convo_mine_state.sqlite3"
+_PROBE_BYTES = 4096
+# Metadata that moves when a transcript grows but needs no new embedding.
+_DATE_KEYS = ("source_date", "source_date_end", "session_end", "date_source")
+
+
+class _MineState:
+    """Per-palace record of (inode, size, probe) for each mined source file."""
+
+    def __init__(self, palace_path: str):
+        import sqlite3
+
+        os.makedirs(palace_path, exist_ok=True)
+        self._db = sqlite3.connect(os.path.join(palace_path, CONVO_STATE_FILE), timeout=30)
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS files ("
+            " source_file TEXT PRIMARY KEY, inode INTEGER, size INTEGER,"
+            " probe TEXT, normalize_version INTEGER, mined_at TEXT)"
+        )
+        self._db.commit()
+
+    def get(self, source_file: str):
+        row = self._db.execute(
+            "SELECT inode, size, probe, normalize_version FROM files WHERE source_file = ?",
+            (source_file,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {"inode": row[0], "size": row[1], "probe": row[2], "normalize_version": row[3]}
+
+    def put(self, source_file: str, sig: dict) -> None:
+        self._db.execute(
+            "INSERT OR REPLACE INTO files VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                source_file,
+                sig["inode"],
+                sig["size"],
+                sig["probe"],
+                NORMALIZE_VERSION,
+                datetime.now().isoformat(),
+            ),
+        )
+        self._db.commit()
+
+    def close(self) -> None:
+        self._db.close()
+
+
+def _probe(fh, end: int) -> str:
+    """Hash of the bytes ``[end - _PROBE_BYTES, end)`` of an open binary file."""
+    start = max(0, end - _PROBE_BYTES)
+    fh.seek(start)
+    return hashlib.sha256(fh.read(end - start)).hexdigest()
+
+
+def _file_signature(path) -> dict:
+    """The (inode, size, probe) of ``path`` now. Raises OSError."""
+    st = os.stat(path)
+    with open(path, "rb") as fh:
+        probe = _probe(fh, st.st_size)
+    return {"inode": st.st_ino, "size": st.st_size, "probe": probe}
+
+
+def _mine_plan(path, prev: dict, sig: dict) -> str:
+    """Return ``"skip"``, ``"grow"`` or ``"whole"`` for a file with state ``prev``.
+
+    No state (a palace mined before this record existed) gives ``"grow"``:
+    the chunk diff then files whatever the palace lacks and nothing else.
+    """
+    if prev is None:
+        return "grow"
+    if (prev.get("normalize_version") or 0) < NORMALIZE_VERSION:
+        return "whole"
+    if prev["inode"] != sig["inode"] or sig["size"] < prev["size"]:
+        return "whole"
+    if sig["size"] == prev["size"]:
+        return "skip" if sig["probe"] == prev["probe"] else "whole"
+    try:
+        with open(path, "rb") as fh:
+            old = _probe(fh, prev["size"])
+    except OSError:
+        return "whole"
+    return "grow" if old == prev["probe"] else "whole"
+
+
+# =============================================================================
 # CHUNKING — exchange pairs for conversations
 # =============================================================================
 
@@ -432,83 +536,143 @@ def _date_chunks(chunks: list, timestamps: list, line_times: list = None) -> Non
         chunk["session_end"] = end or chunk["source_date"]
 
 
-def _file_chunks_locked(collection, source_file, chunks, wing, room, agent, extract_mode):
-    """Lock the source file, purge stale drawers, and upsert fresh chunks.
+def _drawer_meta(chunk, source_file, chunk_room, wing, agent, extract_mode, filed_at):
+    """The metadata of one convo drawer."""
+    return {
+        "wing": wing,
+        "room": chunk_room,
+        "hall": _detect_hall_cached(chunk["content"]),
+        "source_file": source_file,
+        "chunk_index": chunk["chunk_index"],
+        "added_by": agent,
+        "filed_at": filed_at,
+        "ingest_mode": "convos",
+        "extract_mode": extract_mode,
+        "normalize_version": NORMALIZE_VERSION,
+        **(
+            {
+                "source_date": chunk["source_date"],
+                "session_end": chunk["session_end"],
+                "date_source": chunk.get("date_source", "estimate"),
+                **(
+                    {"source_date_end": chunk["source_date_end"]}
+                    if chunk.get("source_date_end")
+                    else {}
+                ),
+            }
+            if chunk.get("source_date")
+            else {}
+        ),
+    }
 
-    Combines the per-file serialization that prevents concurrent agents from
-    duplicating work (via mine_lock) with the normalize-version rebuild
-    contract (purge-before-insert so pre-v2 drawers don't survive).
+
+def _drawer_id(wing, chunk_room, source_file, chunk_index):
+    digest = hashlib.sha256((source_file + str(chunk_index)).encode()).hexdigest()[:24]
+    return f"drawer_{wing}_{chunk_room}_{digest}"
+
+
+def _existing_drawers(collection, source_file):
+    """{chunk_index: (id, document, metadata)} of the convo drawers of a file.
+
+    Returns ``None`` when a drawer has an older ``normalize_version``: the
+    file must then be mined whole.
+    """
+    got = collection.get(where={"source_file": source_file}, include=["documents", "metadatas"])
+    out = {}
+    for did, doc, meta in zip(
+        got.get("ids") or [], got.get("documents") or [], got.get("metadatas") or []
+    ):
+        meta = meta or {}
+        if meta.get("ingest_mode") == "registry" or meta.get("room") == "_registry":
+            continue
+        if (meta.get("normalize_version") or 1) < NORMALIZE_VERSION:
+            return None
+        idx = meta.get("chunk_index")
+        if isinstance(idx, int):
+            out[idx] = (did, doc, meta)
+    return out
+
+
+def _file_chunks_locked(
+    collection, source_file, chunks, wing, room, agent, extract_mode, plan="whole"
+):
+    """Lock the source file and file its chunks.
+
+    ``plan="whole"`` purges every drawer of the file and files all chunks
+    (a rewritten file, or a normalize-version rebuild). ``plan="grow"``
+    compares the chunks with the drawers the file already has and upserts
+    only the new or changed ones; unchanged drawers keep their embedding
+    and get only their date metadata refreshed.
 
     Returns (drawers_added, room_counts_delta, skipped).
     """
     room_counts_delta: dict = defaultdict(int)
     drawers_added = 0
     with mine_lock(source_file):
-        # Re-check after lock — another agent may have just finished this file
-        # at the current schema. A stale-version hit here returns False, so we
-        # still fall through to the purge+rebuild path below.
-        if file_already_mined(collection, source_file):
-            return 0, room_counts_delta, True
+        existing = _existing_drawers(collection, source_file) if plan == "grow" else None
+        if existing is None:
+            plan = "whole"
+            try:
+                collection.delete(where={"source_file": source_file})
+            except Exception:
+                logger.debug("Stale-drawer purge failed for %s", source_file, exc_info=True)
+            existing = {}
+        elif existing and extract_mode != "general":
+            # Keep the room of the first mine, so the drawer ids stay stable.
+            rooms = defaultdict(int)
+            for _did, _doc, meta in existing.values():
+                rooms[meta.get("room") or room] += 1
+            room = max(rooms, key=rooms.get)
 
-        # Purge stale drawers first. When the normalize schema bumps,
-        # file_already_mined() returned False for pre-v2 drawers — clean
-        # them out so the source doesn't end up with mixed old/new drawers.
-        try:
-            collection.delete(where={"source_file": source_file})
-        except Exception:
-            logger.debug("Stale-drawer purge failed for %s", source_file, exc_info=True)
-
-        # Batch chunks into bounded upserts so large transcripts keep most of
-        # the embedding speedup without one huge Chroma/SQLite request. Keep
-        # one filed_at per source file so all transcript drawers share an
+        # Keep one filed_at per source file so all transcript drawers share an
         # ingest timestamp.
         filed_at = datetime.now().isoformat()
-        for batch_start in range(0, len(chunks), DRAWER_UPSERT_BATCH_SIZE):
-            batch_docs: list = []
-            batch_ids: list = []
-            batch_metas: list = []
-            for chunk in chunks[batch_start : batch_start + DRAWER_UPSERT_BATCH_SIZE]:
-                chunk_room = chunk.get("memory_type", room) if extract_mode == "general" else room
+        new_ids = set()
+        to_file = []
+        refresh_ids, refresh_metas = [], []
+        for chunk in chunks:
+            chunk_room = chunk.get("memory_type", room) if extract_mode == "general" else room
+            did = _drawer_id(wing, chunk_room, source_file, chunk["chunk_index"])
+            new_ids.add(did)
+            old = existing.get(chunk["chunk_index"])
+            if old and old[0] == did and old[1] == chunk["content"]:
+                meta = dict(old[2])
+                fresh = _drawer_meta(chunk, source_file, chunk_room, wing, agent, extract_mode, "")
+                if any(meta.get(k) != fresh.get(k) for k in _DATE_KEYS):
+                    for k in _DATE_KEYS:
+                        if k in fresh:
+                            meta[k] = fresh[k]
+                    refresh_ids.append(did)
+                    refresh_metas.append(meta)
+                continue
+            to_file.append((did, chunk_room, chunk))
+
+        stale = [old[0] for old in existing.values() if old[0] not in new_ids]
+        if stale:
+            collection.delete(ids=stale)
+        for start in range(0, len(refresh_ids), DRAWER_UPSERT_BATCH_SIZE):
+            collection.update(
+                ids=refresh_ids[start : start + DRAWER_UPSERT_BATCH_SIZE],
+                metadatas=refresh_metas[start : start + DRAWER_UPSERT_BATCH_SIZE],
+            )
+
+        # Batch chunks into bounded upserts so large transcripts keep most of
+        # the embedding speedup without one huge Chroma/SQLite request.
+        for batch_start in range(0, len(to_file), DRAWER_UPSERT_BATCH_SIZE):
+            batch = to_file[batch_start : batch_start + DRAWER_UPSERT_BATCH_SIZE]
+            for _did, chunk_room, _chunk in batch:
                 if extract_mode == "general":
                     room_counts_delta[chunk_room] += 1
-                drawer_id = f"drawer_{wing}_{chunk_room}_{hashlib.sha256((source_file + str(chunk['chunk_index'])).encode()).hexdigest()[:24]}"
-                batch_docs.append(chunk["content"])
-                batch_ids.append(drawer_id)
-                batch_metas.append(
-                    {
-                        "wing": wing,
-                        "room": chunk_room,
-                        "hall": _detect_hall_cached(chunk["content"]),
-                        "source_file": source_file,
-                        "chunk_index": chunk["chunk_index"],
-                        "added_by": agent,
-                        "filed_at": filed_at,
-                        "ingest_mode": "convos",
-                        "extract_mode": extract_mode,
-                        "normalize_version": NORMALIZE_VERSION,
-                        **(
-                            {
-                                "source_date": chunk["source_date"],
-                                "session_end": chunk["session_end"],
-                                "date_source": chunk.get("date_source", "estimate"),
-                                **(
-                                    {"source_date_end": chunk["source_date_end"]}
-                                    if chunk.get("source_date_end")
-                                    else {}
-                                ),
-                            }
-                            if chunk.get("source_date")
-                            else {}
-                        ),
-                    }
-                )
             try:
                 collection.upsert(
-                    documents=batch_docs,
-                    ids=batch_ids,
-                    metadatas=batch_metas,
+                    documents=[c["content"] for _d, _r, c in batch],
+                    ids=[d for d, _r, _c in batch],
+                    metadatas=[
+                        _drawer_meta(c, source_file, r, wing, agent, extract_mode, filed_at)
+                        for _d, r, c in batch
+                    ],
                 )
-                drawers_added += len(batch_docs)
+                drawers_added += len(batch)
             except Exception as e:
                 if "already exists" not in str(e).lower():
                     raise
@@ -572,7 +736,30 @@ def mine_convos(
         return
 
     collection = get_collection(palace_path) if not dry_run else None
+    state = _MineState(palace_path) if not dry_run else None
+    try:
+        total_drawers, files_skipped, room_counts = _mine_files(
+            files, collection, state, wing, agent, dry_run, extract_mode
+        )
+    finally:
+        if state is not None:
+            state.close()
 
+    print(f"\n{'=' * 55}")
+    print("  Done.")
+    print(f"  Files processed: {len(files) - files_skipped}")
+    print(f"  Files skipped (already filed): {files_skipped}")
+    print(f"  Drawers filed: {total_drawers}")
+    if room_counts:
+        print("\n  By room:")
+        for room, count in sorted(room_counts.items(), key=lambda x: x[1], reverse=True):
+            print(f"    {room:20} {count} files")
+    print('\n  Next: mempalace search "what you\'re looking for"')
+    print(f"{'=' * 55}\n")
+
+
+def _mine_files(files, collection, state, wing, agent, dry_run, extract_mode):
+    """File each convo file. Return (drawers filed, files skipped, room counts)."""
     total_drawers = 0
     files_skipped = 0
     room_counts = defaultdict(int)
@@ -580,22 +767,46 @@ def mine_convos(
     for i, filepath in enumerate(files, 1):
         source_file = str(filepath)
 
-        # Skip if already filed
-        if not dry_run and file_already_mined(collection, source_file):
-            files_skipped += 1
-            continue
+        plan = "whole"
+        sig = None
+        if not dry_run:
+            try:
+                sig = _file_signature(filepath)
+            except OSError:
+                continue
+            prev = state.get(source_file)
+            plan = _mine_plan(filepath, prev, sig)
+            # The state alone cannot see drawers that went away (an erase, a
+            # repair) or a version bump stamped on them: check the palace too.
+            if plan == "skip":
+                if file_already_mined(collection, source_file):
+                    files_skipped += 1
+                    continue
+                plan = "whole"
+            elif prev is None and plan == "grow" and not _has_drawers(collection, source_file):
+                plan = "whole"
+
+        def _register():
+            # A rewritten file that now yields nothing must not keep old drawers.
+            if plan == "whole":
+                try:
+                    collection.delete(where={"source_file": source_file})
+                except Exception:
+                    logger.debug("Purge failed for %s", source_file, exc_info=True)
+            _register_file(collection, source_file, wing, agent)
+            state.put(source_file, sig)
 
         # Normalize format
         try:
             content, line_times = normalize_with_times(str(filepath))
         except (OSError, ValueError):
             if not dry_run:
-                _register_file(collection, source_file, wing, agent)
+                _register()
             continue
 
         if not content or len(content.strip()) < MIN_CHUNK_SIZE:
             if not dry_run:
-                _register_file(collection, source_file, wing, agent)
+                _register()
             continue
 
         # Chunk — either exchange pairs or general extraction
@@ -611,7 +822,7 @@ def mine_convos(
 
         if not chunks:
             if not dry_run:
-                _register_file(collection, source_file, wing, agent)
+                _register()
             continue
 
         # Detect room from content (general mode uses memory_type instead)
@@ -641,11 +852,13 @@ def mine_convos(
         if extract_mode != "general":
             room_counts[room] += 1
 
-        # Lock + purge stale + file fresh chunks. Lock serializes concurrent
-        # agents; purge removes pre-v2 drawers so the schema bump applies.
+        # Lock + file the chunks. Lock serializes concurrent agents. A whole
+        # plan purges the old drawers first (a rewrite, or a schema bump); a
+        # grow plan files only the chunks the palace lacks.
         drawers_added, room_delta, skipped = _file_chunks_locked(
-            collection, source_file, chunks, wing, room, agent, extract_mode
+            collection, source_file, chunks, wing, room, agent, extract_mode, plan
         )
+        state.put(source_file, sig)
         if skipped:
             files_skipped += 1
             continue
@@ -655,17 +868,14 @@ def mine_convos(
         total_drawers += drawers_added
         print(f"  + [{i:4}/{len(files)}] {filepath.name[:50]:50} +{drawers_added}")
 
-    print(f"\n{'=' * 55}")
-    print("  Done.")
-    print(f"  Files processed: {len(files) - files_skipped}")
-    print(f"  Files skipped (already filed): {files_skipped}")
-    print(f"  Drawers filed: {total_drawers}")
-    if room_counts:
-        print("\n  By room:")
-        for room, count in sorted(room_counts.items(), key=lambda x: x[1], reverse=True):
-            print(f"    {room:20} {count} files")
-    print('\n  Next: mempalace search "what you\'re looking for"')
-    print(f"{'=' * 55}\n")
+    return total_drawers, files_skipped, room_counts
+
+
+def _has_drawers(collection, source_file) -> bool:
+    try:
+        return bool(collection.get(where={"source_file": source_file}, limit=1).get("ids"))
+    except Exception:
+        return False
 
 
 if __name__ == "__main__":
